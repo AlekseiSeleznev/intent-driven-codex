@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+KEEP_SMOKE=0
+RUN_SMOKE=1
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/check-overlay [--no-smoke] [--keep-smoke]
+
+Checks the Codex intent-driven OpenSpec overlay without patching OpenSpec.
+By default it creates a temporary zz-smoke-intent-overlay-* change, verifies
+intent-driven status/apply context, and safely removes only that smoke change.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-smoke) RUN_SMOKE=0 ;;
+    --keep-smoke) KEEP_SMOKE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT" || exit 1
+
+SMOKE_CHANGE=""
+SMOKE_DIR=""
+CREATED_SMOKE=0
+
+fail() {
+  local layer="$1"
+  shift
+  echo "✗ [$layer] $*" >&2
+  exit 1
+}
+
+pass() {
+  local layer="$1"
+  shift
+  echo "✓ [$layer] $*"
+}
+
+run_layer() {
+  local layer="$1"
+  shift
+  echo "→ [$layer] $*"
+  "$@" || fail "$layer" "command failed: $*"
+}
+
+cleanup() {
+  if [[ "$CREATED_SMOKE" == "1" && "$KEEP_SMOKE" == "0" ]]; then
+    case "$SMOKE_CHANGE" in
+      zz-smoke-intent-overlay-*)
+        if [[ -n "$SMOKE_DIR" && "$SMOKE_DIR" == "$ROOT/openspec/changes/$SMOKE_CHANGE" && -d "$SMOKE_DIR" ]]; then
+          rm -rf "$SMOKE_DIR"
+          echo "✓ [project artifact] removed smoke change $SMOKE_CHANGE"
+        fi
+        ;;
+      *)
+        echo "! [project artifact] refusing cleanup for unexpected smoke name: $SMOKE_CHANGE" >&2
+        ;;
+    esac
+  elif [[ "$CREATED_SMOKE" == "1" ]]; then
+    echo "! [project artifact] kept smoke change at $SMOKE_DIR"
+  fi
+}
+trap cleanup EXIT
+
+command -v openspec >/dev/null 2>&1 || fail "OpenSpec CLI" "openspec executable not found"
+run_layer "OpenSpec CLI" openspec --version
+
+SCHEMAS_JSON="$(openspec schemas --json 2>/tmp/check-overlay-schemas.err)" || {
+  cat /tmp/check-overlay-schemas.err >&2
+  fail "OpenSpec CLI" "openspec schemas --json failed"
+}
+python3 -c 'import json, sys
+schemas = json.load(sys.stdin)
+for schema in schemas:
+    if schema.get("name") == "intent-driven":
+        if schema.get("source") != "project":
+            raise SystemExit(f"intent-driven source is {schema.get("source")!r}, expected project")
+        required = ["proposal", "specs", "design", "adr", "tasks"]
+        artifacts = schema.get("artifacts") or []
+        if artifacts != required:
+            raise SystemExit(f"intent-driven artifacts {artifacts!r}, expected {required!r}")
+        break
+else:
+    raise SystemExit("intent-driven schema not found")' <<<"$SCHEMAS_JSON" || fail "local schema" "intent-driven schema is missing or not project-local"
+pass "local schema" "intent-driven is project-local with proposal/specs/design/adr/tasks"
+
+run_layer "local schema" openspec schema validate intent-driven
+run_layer "OpenSpec CLI" openspec list --json
+
+if [[ "$RUN_SMOKE" == "0" ]]; then
+  echo "! [project artifact] smoke skipped by --no-smoke"
+  echo "✓ Overlay check complete"
+  exit 0
+fi
+
+SMOKE_CHANGE="zz-smoke-intent-overlay-$(date +%Y%m%d%H%M%S)-$$"
+SMOKE_DIR="$ROOT/openspec/changes/$SMOKE_CHANGE"
+[[ ! -e "$SMOKE_DIR" ]] || fail "project artifact" "smoke target already exists: $SMOKE_DIR"
+
+run_layer "project artifact" openspec new change "$SMOKE_CHANGE" --schema intent-driven
+CREATED_SMOKE=1
+
+STATUS_JSON="$(openspec status --change "$SMOKE_CHANGE" --json 2>/tmp/check-overlay-status.err)" || {
+  cat /tmp/check-overlay-status.err >&2
+  fail "OpenSpec CLI" "openspec status --change $SMOKE_CHANGE --json failed"
+}
+python3 -c 'import json, sys
+obj = json.load(sys.stdin)
+if obj.get("schemaName") != "intent-driven":
+    raise SystemExit(f"schemaName={obj.get("schemaName")!r}")
+expected = ["proposal", "specs", "design", "adr", "tasks"]
+actual = [a.get("id") for a in obj.get("artifacts", [])]
+if actual != expected:
+    raise SystemExit(f"artifacts={actual!r}, expected={expected!r}")
+if obj.get("applyRequires") != ["tasks"]:
+    raise SystemExit(f"applyRequires={obj.get("applyRequires")!r}")
+if obj["artifacts"][0].get("status") != "ready":
+    raise SystemExit("proposal artifact is not ready")' <<<"$STATUS_JSON" || fail "generated skill" "new smoke change does not expose expected intent-driven artifact graph"
+pass "generated skill" "new smoke change exposes expected artifact graph"
+
+mkdir -p "$SMOKE_DIR/specs/smoke-capability"
+cat > "$SMOKE_DIR/proposal.md" <<'SMOKE'
+## Why
+Smoke check for intent-driven overlay compatibility.
+
+## What Changes
+- Add temporary smoke-only artifacts.
+
+## Capabilities
+- smoke-capability
+
+## Impact
+- None. The checker deletes this temporary change by default.
+SMOKE
+
+cat > "$SMOKE_DIR/specs/smoke-capability/spec.md" <<'SMOKE'
+## ADDED Requirements
+
+### Requirement: Smoke compatibility
+The overlay MUST expose proposal, specs, design, adr, and tasks context to apply.
+
+#### Scenario: Apply context is available
+- **GIVEN** a completed smoke change
+- **WHEN** apply instructions are requested
+- **THEN** the response includes every intent-driven artifact context file
+SMOKE
+
+cat > "$SMOKE_DIR/design.md" <<'SMOKE'
+## Overview
+Smoke-only design.
+
+## C4 Context
+No diagram needed: this smoke change creates no runtime system boundary.
+
+## Decisions
+- Use temporary OpenSpec artifacts only.
+SMOKE
+
+cat > "$SMOKE_DIR/adr.md" <<'SMOKE'
+## ADR Review
+
+## Existing In-Force ADRs
+- None
+
+## Decisions Evaluated
+- Smoke check does not create durable architecture decisions.
+
+## New Durable ADRs Created
+- None
+
+## Superseded ADRs
+- None
+
+## No ADR Needed
+- Smoke-only temporary change; no durable architectural decision is made.
+SMOKE
+
+cat > "$SMOKE_DIR/tasks.md" <<'SMOKE'
+## 1. Smoke
+
+- [x] 1.1 Create temporary artifacts for overlay compatibility check.
+SMOKE
+
+STATUS_JSON="$(openspec status --change "$SMOKE_CHANGE" --json 2>/tmp/check-overlay-status-complete.err)" || {
+  cat /tmp/check-overlay-status-complete.err >&2
+  fail "project artifact" "completed smoke status failed"
+}
+python3 -c 'import json, sys
+obj = json.load(sys.stdin)
+if not obj.get("isComplete"):
+    raise SystemExit("isComplete is false")
+not_done = [a for a in obj.get("artifacts", []) if a.get("status") != "done"]
+if not_done:
+    raise SystemExit(f"artifacts not done: {not_done!r}")' <<<"$STATUS_JSON" || fail "project artifact" "completed smoke change is not apply-ready"
+pass "project artifact" "smoke change is apply-ready"
+
+APPLY_JSON="$(openspec instructions apply --change "$SMOKE_CHANGE" --json 2>/tmp/check-overlay-apply.err)" || {
+  cat /tmp/check-overlay-apply.err >&2
+  fail "generated skill" "apply instructions failed"
+}
+python3 -c 'import json, sys
+obj = json.load(sys.stdin)
+expected = ["proposal", "specs", "design", "adr", "tasks"]
+ctx = obj.get("contextFiles") or {}
+missing = [key for key in expected if not ctx.get(key)]
+if missing:
+    raise SystemExit(f"missing context keys: {missing!r}")
+if obj.get("progress", {}).get("total") != 1:
+    raise SystemExit(f"unexpected progress={obj.get("progress")!r}")' <<<"$APPLY_JSON" || fail "generated skill" "apply context is missing required intent-driven files"
+pass "generated skill" "apply context includes proposal/specs/design/adr/tasks"
+
+echo "✓ Overlay check complete"

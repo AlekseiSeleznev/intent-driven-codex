@@ -1,0 +1,122 @@
+name: intent-driven
+version: 1
+description: Intent-driven OpenSpec workflow for Codex - proposal -> specs -> design -> adr -> tasks
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Initial proposal document outlining the change intent
+    template: proposal.md
+    instruction: >
+      Create the proposal document that establishes WHY this change is needed.
+
+      Sections:
+      - **Why**: 1-2 sentences on the problem or opportunity.
+      - **What Changes**: Bullet list of concrete changes. Mark breaking changes
+        with **BREAKING**.
+      - **Capabilities**: Identify behavior specs to create or modify.
+        New capabilities become `specs/<capability>/spec.md` files.
+        Modified capabilities must use existing names from `openspec/specs/`.
+      - **Impact**: Affected code, APIs, dependencies, docs, or systems.
+
+      Research existing specs before filling the Capabilities section. Keep the
+      proposal focused on intent and scope; implementation details belong in
+      design.md.
+    requires: []
+
+  - id: specs
+    generates: specs/**/*.md
+    description: OpenSpec Markdown specs with normative requirements and Gherkin-style scenarios
+    template: spec.md
+    instruction: >
+      Create one OpenSpec Markdown delta spec per capability listed in the
+      proposal. Use `specs/<capability>/spec.md`.
+
+      Use OpenSpec delta headers exactly:
+      - `## ADDED Requirements`
+      - `## MODIFIED Requirements`
+      - `## REMOVED Requirements`
+      - `## RENAMED Requirements`
+
+      Each requirement MUST use `### Requirement: <name>` and MUST include
+      normative requirement prose with `MUST` or `SHALL` before scenarios.
+      Every requirement MUST have at least one `#### Scenario: <name>` block.
+      Scenarios should be Gherkin-style observable behavior with `GIVEN`,
+      `WHEN`, `THEN`, and optional `AND`/`BUT` steps.
+
+      For MODIFIED requirements, copy the entire existing requirement block
+      from `openspec/specs/<capability>/spec.md` and edit it to represent the
+      full desired behavior after the change. Do not use partial diffs.
+    requires:
+      - proposal
+
+  - id: design
+    generates: design.md
+    description: Technical design document with implementation approach, trade-offs, and boundaries
+    template: design.md
+    instruction: >
+      Create the design document that explains HOW to implement the behavior
+      defined in specs.
+
+      Before writing, read proposal.md, all delta specs, and top-level `adr/*.md`
+      when present. Build the in-force ADR set by following supersession links.
+      If an in-force ADR should be revisited, do not edit it; record the need
+      under Open Questions so the ADR step can create a superseding ADR.
+
+      Include context, goals/non-goals, technical decisions with alternatives,
+      risks/trade-offs, migration/rollback notes, and open questions. Use C4
+      style ASCII or Mermaid diagrams when boundaries, integrations, runtime
+      units, or deployment shape are non-trivial; otherwise state why no diagram
+      is needed.
+    requires:
+      - proposal
+      - specs
+
+  - id: adr
+    generates: adr.md
+    description: Per-change ADR review with optional durable ADR references
+    template: adr.md
+    instruction: >
+      Create `openspec/changes/<change>/adr.md` as the ADR review gate for this
+      change. This artifact is required for every change, even when no durable
+      ADR is needed.
+
+      Read design.md and top-level `adr/*.md` when present. Determine currently
+      in-force ADRs by following supersession links. List evaluated decisions,
+      existing in-force ADRs considered, durable ADRs created, superseded ADRs,
+      and no-ADR rationale.
+
+      If a durable architectural decision is needed, create a new append-only
+      file in top-level `adr/NNNN-kebab-title.md`. Do not rewrite accepted ADRs.
+      If a decision replaces a prior one, create a new ADR that supersedes the
+      old ADR and reference that relationship from this review.
+    requires:
+      - design
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist with dependency-ordered checkbox tasks
+    template: tasks.md
+    instruction: >
+      Create the task list that breaks down the implementation work.
+
+      Each task MUST be a checkbox in the form `- [ ] X.Y Task description` so
+      the apply phase can track progress. Group related tasks under numbered
+      headings. Order tasks by dependency and make each task verifiable.
+
+      Reference proposal for intent, specs for behavior, design for approach,
+      per-change adr.md for ADR review, and top-level `adr/*.md` for durable
+      architectural commitments.
+    requires:
+      - specs
+      - design
+      - adr
+
+apply:
+  requires:
+    - tasks
+  tracks: tasks.md
+  instruction: |
+    Read all context files from OpenSpec, then read top-level adr/*.md when
+    present. Work through pending tasks, keep changes scoped, and mark tasks
+    complete as they are verified. Pause on blockers, unclear requirements, or
+    artifact mismatches.

@@ -1,0 +1,22 @@
+---
+description: Fast-forward OpenSpec planning artifacts with explicit checkpoint policy
+argument-hint: change name or description
+---
+
+Fast-forward is a convenience wrapper around creating all planning artifacts needed before apply.
+
+Use only when the user explicitly wants fast-forward behavior.
+
+Rules:
+- Use the repository default schema unless the user requests a schema.
+- For `intent-driven`, generate artifacts in order: `proposal`, `specs`, `design`, `adr`, `tasks`.
+- Follow `openspec instructions <artifact> --change <name> --json` for every artifact.
+- Read dependencies before writing each artifact.
+- Apply `grill-with-docs` (not the plain review skill), `gherkin-authoring`, `c4-diagrams`, and `architectural-decision-records` guidance when their conditions are met.
+
+Git discipline:
+- Before the first artifact and after every artifact, run `git status --short` and show the checkpoint boundary.
+- A pre-approved batch may continue through artifacts, but each artifact checkpoint must still be visible in the final summary.
+- Mandatory checkpoints still apply.
+- If the user has not pre-approved batch checkpoints, stop after the first artifact and recommend `/opsx:continue`.
+- Never hide commits or merges.

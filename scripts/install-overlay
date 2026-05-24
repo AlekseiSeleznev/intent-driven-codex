@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/install-overlay <target-project> [--dry-run] [--force-config]
+
+Safely installs the intent-driven Codex/OpenSpec overlay into a target project.
+It copies only overlay-owned files and does not overwrite different existing files
+unless --force-config is used for openspec/config.yaml.
+USAGE
+}
+
+[[ $# -gt 0 ]] || { usage >&2; exit 2; }
+TARGET=""
+DRY_RUN=0
+FORCE_CONFIG=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --force-config) FORCE_CONFIG=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      if [[ -z "$TARGET" ]]; then TARGET="$1"; else echo "Unexpected argument: $1" >&2; exit 2; fi
+      ;;
+  esac
+  shift
+done
+[[ -n "$TARGET" ]] || { usage >&2; exit 2; }
+
+SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET="$(mkdir -p "$TARGET" && cd "$TARGET" && pwd)"
+
+copy_file_no_overwrite() {
+  local src="$1"
+  local rel="$2"
+  local dst="$TARGET/$rel"
+  if [[ -e "$dst" ]]; then
+    if cmp -s "$src" "$dst"; then
+      echo "SKIP identical $rel"
+    else
+      echo "SKIP existing $rel"
+    fi
+    return 0
+  fi
+  echo "COPY $rel"
+  if [[ "$DRY_RUN" == "0" ]]; then
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+  fi
+}
+
+copy_tree_no_overwrite() {
+  local relroot="$1"
+  while IFS= read -r -d '' src; do
+    local rel="${src#$SOURCE/}"
+    copy_file_no_overwrite "$src" "$rel"
+  done < <(find "$SOURCE/$relroot" -type f -print0 | sort -z)
+}
+
+copy_tree_no_overwrite ".codex/prompts"
+copy_tree_no_overwrite ".codex/skills"
+copy_tree_no_overwrite "openspec/schemas/intent-driven"
+copy_file_no_overwrite "$SOURCE/scripts/check-overlay" "scripts/check-overlay"
+copy_file_no_overwrite "$SOURCE/AGENTS.md" "AGENTS.md"
+copy_file_no_overwrite "$SOURCE/docs/lifecycle.md" "docs/intent-driven-lifecycle.md"
+copy_file_no_overwrite "$SOURCE/docs/update-safety.md" "docs/intent-driven-update-safety.md"
+
+if [[ ! -e "$TARGET/adr/README.md" ]]; then
+  copy_file_no_overwrite "$SOURCE/adr/README.md" "adr/README.md"
+else
+  echo "SKIP existing adr/README.md"
+fi
+
+CONFIG="$TARGET/openspec/config.yaml"
+if [[ -e "$CONFIG" && "$FORCE_CONFIG" == "0" ]]; then
+  echo "SKIP existing openspec/config.yaml"
+  echo "NOTE: review whether to set schema: intent-driven manually."
+else
+  echo "WRITE openspec/config.yaml"
+  if [[ "$DRY_RUN" == "0" ]]; then
+    mkdir -p "$TARGET/openspec"
+    if [[ -e "$CONFIG" ]]; then cp "$CONFIG" "$CONFIG.bak.$(date +%Y%m%d%H%M%S)"; fi
+    cat > "$CONFIG" <<'CONFIGEOF'
+schema: intent-driven
+
+context: |
+  This project uses Codex-native intent-driven development with OpenSpec.
+  Workflow: proposal -> specs -> design -> adr -> tasks.
+
+rules:
+  proposal:
+    - Draft proposal.md from user intent and project context.
+    - Use grill-with-docs when scope, risk, or assumptions are material.
+  specs:
+    - Use OpenSpec delta sections and Gherkin-style scenarios in Markdown.
+  design:
+    - Use C4-style diagrams for non-trivial boundaries or explain why none is needed.
+  adr:
+    - Durable ADRs live in top-level adr/ and are append-only.
+  tasks:
+    - Create dependency-ordered checkbox tasks based on proposal/specs/design/ADR.
+CONFIGEOF
+  fi
+fi
+
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/scripts/check-overlay" ]]; then
+  chmod +x "$TARGET/scripts/check-overlay"
+fi
+
+echo "Install overlay complete. Next: cd '$TARGET' && openspec schema validate intent-driven && scripts/check-overlay"
