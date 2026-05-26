@@ -1,2 +1,8 @@
 .~lock.*#
 .worktrees/
+
+# Local secrets and environment overrides
+.secrets.local.env
+.secrets.*.local.env
+.env.local
+.env.*.local

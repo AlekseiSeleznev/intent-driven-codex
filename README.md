@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.0-blue">
+  <img alt="Version" src="https://img.shields.io/badge/version-v0.1.1-blue">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green"></a>
   <img alt="OpenSpec" src="https://img.shields.io/badge/OpenSpec-1.3.x-2f6fed">
   <img alt="Codex" src="https://img.shields.io/badge/Codex-native-111827">
@@ -38,6 +38,9 @@ OpenSpec remains the engine. Codex executes the workflow.
 - Project-local OpenSpec schema: `intent-driven`.
 - Lifecycle: `proposal -> specs -> design -> adr -> tasks -> apply -> verify -> archive`.
 - Codex `/opsx:*` commands for the full OpenSpec workflow.
+- Root `CONSTITUTION.md` for persistent project rules that Codex reads before `/opsx:*` actions.
+- Root `ARCHITECTURE.md` as the current architecture snapshot for new chats.
+- Local `.secrets.local.env` handling for external-system credentials without committing secret values.
 - `grill-with-docs` for context-aware proposal and design review.
 - Gherkin-style scenarios inside OpenSpec Markdown specs.
 - C4-style diagrams for non-trivial architecture boundaries.
@@ -48,22 +51,38 @@ OpenSpec remains the engine. Codex executes the workflow.
 - Overlay compatibility smoke checks after OpenSpec or template updates.
 - Published canonical OpenSpec specs describing the behavior of the template itself.
 
+## What is included in v0.1.1
+
+`v0.1.1` is the current documented template version. It includes persistent project context support for Codex-driven OpenSpec work:
+
+- root `CONSTITUTION.md` for mandatory project rules that Codex reads before `/opsx:*`;
+- root `ARCHITECTURE.md` for current architecture context and links to in-force ADRs;
+- shared `project-constitution` preflight skill used by `/opsx:*` prompts and OpenSpec lifecycle skills;
+- strict missing-constitution behavior with bootstrap-safe and diagnostic exceptions;
+- conflict stops when constitution rules contradict the request or OpenSpec artifacts;
+- local-only `.secrets.local.env` for external-system credentials, with tracked `.secrets.example.env` placeholders;
+- `openspec/README.md` bridge explaining which context lives outside OpenSpec change artifacts;
+- ADR 0003-backed architecture snapshot model, where `ARCHITECTURE.md` is current state and `adr/` is durable history;
+- canonical OpenSpec specs and docs for constitution lifecycle, project context architecture, installation, update safety, and secret handling.
+
 ## Current repository state
 
-The bootstrap implementation and Codex Goal guidance changes have already been
-archived. The repository now contains canonical OpenSpec specs for the base
-overlay and goal-guided apply/bulk-apply behavior, plus one accepted project
-ADR.
+The bootstrap implementation, Codex Goal guidance, project constitution support,
+and project context architecture formalization have already been archived. The
+repository contains canonical OpenSpec specs for the base overlay, goal-guided
+apply/bulk-apply behavior, persistent project context, and the current project
+ADR set.
 
 | Area | Current state |
 | --- | --- |
-| Active OpenSpec changes | none (`openspec list --json`) |
+| Active OpenSpec changes | none (`openspec list --json` returns an empty change list at this checkpoint) |
 | Default schema | `intent-driven` from `openspec/config.yaml` |
 | Project-local schema | `openspec/schemas/intent-driven/` |
 | Canonical specs | `openspec/specs/**/spec.md` |
-| Archived changes | `openspec/changes/archive/2026-05-24-implement-intent-driven-codex-template/`, `openspec/changes/archive/2026-05-24-add-codex-goal-guidance/` |
+| Archived changes | `openspec/changes/archive/2026-05-24-implement-intent-driven-codex-template/`<br>`openspec/changes/archive/2026-05-24-add-codex-goal-guidance/`<br>`openspec/changes/archive/2026-05-25-add-project-constitution/`<br>`openspec/changes/archive/2026-05-26-formalize-project-context-architecture/` |
 | Goal guidance specs | `openspec/specs/codex-opsx-workflow/spec.md`, `openspec/specs/template-installation/spec.md` |
-| Durable project ADR | `adr/0001-adopt-codex-native-intent-driven-openspec-overlay.md` |
+| Project context | `CONSTITUTION.md`, `ARCHITECTURE.md`, `openspec/README.md`, `.secrets.example.env`, `.codex/skills/project-constitution/SKILL.md` |
+| Durable project ADRs | `adr/0001-adopt-codex-native-intent-driven-openspec-overlay.md`, `adr/0003-formalize-project-context-entrypoints.md` (ADR 0002 is superseded) |
 | Compatibility check | `scripts/check-overlay` |
 | Installer | `scripts/install-overlay` |
 
@@ -74,33 +93,60 @@ ADR.
 ```mermaid
 flowchart LR
   Dev["Developer / Project Owner"]
-  Codex["Codex Agent\nworkflow executor"]
-  CodexGoal["Codex Goal\noptional long-run orchestrator"]
-  Overlay["Intent-Driven Codex\nproject-local overlay"]
-  OpenSpec["OpenSpec CLI\nlifecycle engine"]
-  TargetRepo["Target Project Repository\ncode, tests, docs"]
-  UpstreamSchemas["intent-driven-dev/openspec-schemas\nschema ideas"]
-  UpstreamTemplate["intent-driven-dev/intent-driven-template\nworkflow ideas"]
+  Codex["Codex Agent
+workflow executor"]
+  CodexGoal["Codex Goal
+optional long-run orchestrator"]
+  Overlay["Intent-Driven Codex
+project-local overlay"]
+  Constitution["CONSTITUTION.md
+tracked project rules, no secrets"]
+  Architecture["ARCHITECTURE.md
+current architecture snapshot"]
+  LocalSecrets[".secrets.local.env
+local secret values, ignored"]
+  OpenSpec["OpenSpec CLI
+lifecycle engine"]
+  TargetRepo["Target Project Repository
+code, tests, docs"]
+  ExternalSystems["External systems
+APIs, OData, services"]
+  UpstreamSchemas["intent-driven-dev/openspec-schemas
+schema ideas"]
+  UpstreamTemplate["intent-driven-dev/intent-driven-template
+workflow ideas"]
 
   Dev -->|"runs /opsx:* workflow"| Codex
   Dev -->|"copies generated /goal prompt"| CodexGoal
   CodexGoal -->|"runs embedded /opsx:* workflow"| Codex
   Codex -->|"uses prompts and skills"| Overlay
+  Overlay -->|"runs project context preflight"| Constitution
+  Overlay -->|"reads current architecture"| Architecture
+  Overlay -. "reads only when external access is needed" .-> LocalSecrets
   Overlay -->|"calls public CLI"| OpenSpec
-  OpenSpec -->|"reads and writes artifacts"| TargetRepo
-  Overlay -->|"installs schema, skills, docs"| TargetRepo
+  OpenSpec -->|"reads and writes OpenSpec artifacts"| TargetRepo
+  Overlay -->|"installs schema, skills, docs, constitution template"| TargetRepo
+  Overlay -. "uses listed systems with local credentials" .-> ExternalSystems
+  OpenSpec -. "does not read" .-> Constitution
   Overlay -.->|"adapts"| UpstreamSchemas
   Overlay -.->|"adapts"| UpstreamTemplate
 
   classDef actor fill:#fff4cc,stroke:#d48a00,color:#332200,stroke-width:2px;
-  classDef system fill:#dff3ff,stroke:#1d75b9,color:#042033,stroke-width:2px;
+  classDef codex fill:#dff3ff,stroke:#1d75b9,color:#042033,stroke-width:2px;
+  classDef rules fill:#fff7ed,stroke:#ea580c,color:#431407,stroke-width:2px;
+  classDef secret fill:#fee2e2,stroke:#dc2626,color:#450a0a,stroke-width:2px;
+  classDef openspec fill:#e8fff5,stroke:#16885a,color:#06291b,stroke-width:2px;
   classDef repo fill:#e8f7e8,stroke:#2e8b57,color:#062d18,stroke-width:2px;
   classDef upstream fill:#f3e8ff,stroke:#7b3fb2,color:#26083d,stroke-width:2px;
   class Dev actor;
-  class Codex,CodexGoal,Overlay,OpenSpec system;
-  class TargetRepo repo;
+  class Codex,CodexGoal,Overlay codex;
+  class Constitution,Architecture rules;
+  class LocalSecrets secret;
+  class OpenSpec openspec;
+  class TargetRepo,ExternalSystems repo;
   class UpstreamSchemas,UpstreamTemplate upstream;
 ```
+
 
 ### C4 container and functionality view
 
@@ -109,66 +155,103 @@ flowchart TB
   User["Developer"]
 
   subgraph CodexLayer["Codex layer (.codex)"]
-    Prompts["Prompts\n.codex/prompts/opsx-*.md"]
-    GoalGuidance["Goal guidance\ncopy-paste /goal hand-off"]
-    LifecycleSkills["OpenSpec lifecycle skills\nnew, continue, apply, verify, sync, archive"]
-    QualitySkills["Quality skills\ngrill-with-docs, Gherkin, C4, ADR"]
-    GitSkill["Git discipline\nmandatory checkpoints"]
+    Prompts["Prompts
+.codex/prompts/opsx-*.md"]
+    ConstitutionSkill["Project constitution preflight
+.codex/skills/project-constitution"]
+    GoalGuidance["Goal guidance
+copy-paste /goal hand-off"]
+    LifecycleSkills["OpenSpec lifecycle skills
+new, continue, apply, verify, sync, archive"]
+    QualitySkills["Quality skills
+grill-with-docs, Gherkin, C4, ADR"]
+    GitSkill["Git discipline
+mandatory checkpoints"]
+  end
+
+  subgraph ProjectRules["Project rules and local access"]
+    Constitution["CONSTITUTION.md
+required tech, MCP, docs, verification"]
+    Architecture["ARCHITECTURE.md
+current architecture snapshot"]
+    SecretsExample[".secrets.example.env
+tracked variable names only"]
+    LocalSecrets[".secrets.local.env
+ignored local values"]
   end
 
   subgraph OpenSpecLayer["OpenSpec layer"]
     CLI["OpenSpec CLI 1.3.x"]
-    Schema["intent-driven schema\nproposal → specs → design → adr → tasks"]
-    Instructions["OpenSpec instructions\ntemplates + apply context"]
+    Schema["intent-driven schema
+proposal → specs → design → adr → tasks"]
+    Instructions["OpenSpec instructions
+templates + apply context"]
   end
 
   subgraph ProjectState["Project state"]
-    ActiveChange["Active change\nopenspec/changes/<change>/"]
-    CanonicalSpecs["Canonical specs\nopenspec/specs/**/spec.md"]
-    Archive["Archived changes\nopenspec/changes/archive/**"]
-    ADRs["Durable ADRs\nadr/NNNN-*.md"]
-    Code["Project implementation\nsource code + tests"]
+    CanonicalSpecs["Canonical specs
+openspec/specs/**/spec.md"]
+    Archive["Archived changes
+openspec/changes/archive/**"]
+    ADRs["Durable ADRs
+adr/NNNN-*.md"]
+    Code["Project implementation
+source code + tests"]
   end
 
   subgraph Safety["Install and update safety"]
-    Installer["scripts/install-overlay\nno-overwrite install"]
-    Checker["scripts/check-overlay\ncompatibility smoke test"]
+    Installer["scripts/install-overlay
+no-overwrite install"]
+    Checker["scripts/check-overlay
+constitution + overlay smoke checks"]
     Docs["README / INSTALL_CODEX / AGENTS / docs"]
   end
 
   User -->|"/opsx:new / continue / apply / verify / archive"| Prompts
+  Prompts --> ConstitutionSkill
+  LifecycleSkills --> ConstitutionSkill
+  ConstitutionSkill --> Constitution
+  ConstitutionSkill --> Architecture
+  ConstitutionSkill -. "variable names only" .-> SecretsExample
+  ConstitutionSkill -. "read only when needed" .-> LocalSecrets
   Prompts -->|"long apply or eligible bulk apply"| GoalGuidance
   GoalGuidance -->|"user sends generated /goal"| LifecycleSkills
   Prompts --> LifecycleSkills
   Prompts --> QualitySkills
   Prompts --> GitSkill
   LifecycleSkills --> CLI
-  QualitySkills --> ActiveChange
   QualitySkills --> ADRs
-  GitSkill --> ActiveChange
+  GitSkill --> Archive
   CLI --> Schema
   CLI --> Instructions
-  Instructions --> ActiveChange
-  ActiveChange -->|"archive sync"| CanonicalSpecs
-  ActiveChange -->|"archive move"| Archive
+  Instructions --> CanonicalSpecs
+  CLI --> Archive
   LifecycleSkills --> Code
+  Checker --> Constitution
+  Checker --> LocalSecrets
   Checker --> CLI
   Checker --> Schema
   Installer --> Prompts
   Installer --> LifecycleSkills
+  Installer --> Constitution
   Docs --> User
 
   classDef codex fill:#e8f1ff,stroke:#2f67d8,color:#061b4a,stroke-width:2px;
+  classDef rules fill:#fff7ed,stroke:#ea580c,color:#431407,stroke-width:2px;
+  classDef secret fill:#fee2e2,stroke:#dc2626,color:#450a0a,stroke-width:2px;
   classDef openspec fill:#e8fff5,stroke:#16885a,color:#06291b,stroke-width:2px;
   classDef state fill:#fff4e6,stroke:#d77a00,color:#3b2000,stroke-width:2px;
   classDef safety fill:#f5e8ff,stroke:#8b42c9,color:#2a083d,stroke-width:2px;
   classDef actor fill:#ffffff,stroke:#555,color:#111,stroke-width:2px;
   class User actor;
-  class Prompts,GoalGuidance,LifecycleSkills,QualitySkills,GitSkill codex;
+  class Prompts,ConstitutionSkill,GoalGuidance,LifecycleSkills,QualitySkills,GitSkill codex;
+  class Constitution,Architecture,SecretsExample rules;
+  class LocalSecrets secret;
   class CLI,Schema,Instructions openspec;
-  class ActiveChange,CanonicalSpecs,Archive,ADRs,Code state;
+  class CanonicalSpecs,Archive,ADRs,Code state;
   class Installer,Checker,Docs safety;
 ```
+
 
 ## OpenSpec schema
 
@@ -209,6 +292,80 @@ Prompt files live in `.codex/prompts`.
 | `/opsx:check-overlay` | Run overlay compatibility and smoke checks. |
 | `/opsx:bulk-apply` | Apply several independent changes through isolated flows; for eligible multi-change runs it may first print a parent `/goal` prompt before worktrees/subagents. |
 | `/opsx:bulk-archive` | Archive several completed changes after conflict checks. |
+
+## Project context
+
+`ARCHITECTURE.md` is the current architecture snapshot for new chats and architecture-sensitive work. It summarizes the current state and links to in-force ADRs. Durable rationale remains in `adr/`, and `openspec/README.md` bridges OpenSpec lifecycle files to these root project context files.
+
+`CONSTITUTION.md` is the persistent, Git-tracked project rule source
+that Codex reads before `/opsx:*` workflow actions. It is **not** an OpenSpec
+change artifact, is not archived with changes, and is not read by OpenSpec CLI
+itself. The Codex overlay enforces it through the shared
+`project-constitution` skill and short preflight rules in the `/opsx:*` prompts
+and OpenSpec lifecycle skills.
+
+Use it to record project context that must not be missed:
+
+| Constitution section | What Codex uses it for |
+| --- | --- |
+| Required Technologies | Mandatory languages, frameworks, runtimes, package managers, architecture rules, and coding standards. |
+| MCP Servers | Which MCP server to use for a development block and which non-secret parameters are allowed. |
+| External Systems | Non-MCP systems, access method, and the credential variable names needed for them. |
+| Secret Handling | The boundary between tracked variable names and local secret values. |
+| Documentation Sources | Project docs, official docs, and lookup rules Codex should prefer. |
+| Verification Rules | Checks Codex must run or explicitly report before claiming completion. |
+| Additional AI Instructions | Project-wide constraints that should not disappear between chats. |
+
+### Workflow behavior
+
+When the constitution is present, Codex applies relevant rules before planning,
+apply, verify, sync, archive, and bulk workflows. This keeps project-wide
+technology choices, MCP usage, documentation policy, and verification
+requirements visible throughout the whole OpenSpec lifecycle. For architecture-sensitive work Codex also reads `ARCHITECTURE.md`, `adr/README.md`, and relevant in-force ADRs.
+
+When the constitution is missing, Codex reports it and offers to create it from
+the template. Only bootstrap-safe or diagnostic actions should continue without
+it, such as exploration, creating the constitution, starting a constitution setup
+change, or `/opsx:check-overlay`. Apply, verify, sync, archive, and bulk
+workflows stop until the constitution exists or the user gives an explicit
+one-time override.
+
+When constitution rules conflict with the user request or OpenSpec artifacts,
+Codex stops before modifying files or calling external systems and asks whether
+to update the constitution, update the artifact/task, change the request, or use
+a one-time override.
+
+### Local secrets
+
+Never put real logins, passwords, tokens, or private service URLs in
+`CONSTITUTION.md`, OpenSpec artifacts, ADRs, docs, examples, diffs, or
+chat output. Keep values in ignored `.secrets.local.env`. Tracked files may
+contain variable names and empty placeholders only, for example in
+`.secrets.example.env`.
+
+Codex reads `.secrets.local.env` only when the current workflow actually needs
+an external system listed in the constitution. If required variables are
+missing, Codex reports the missing variable names and stops before the external
+call.
+
+Example tracked constitution entry:
+
+```text
+External system: Customer OData
+Required variables: CUSTOMER_ODATA_URL, CUSTOMER_ODATA_USERNAME, CUSTOMER_ODATA_PASSWORD
+Values: stored locally in .secrets.local.env
+```
+
+Example local-only secret file:
+
+```dotenv
+CUSTOMER_ODATA_URL=
+CUSTOMER_ODATA_USERNAME=
+CUSTOMER_ODATA_PASSWORD=
+```
+
+Keep the example file empty or placeholder-only when tracked; fill real values
+only in the ignored local file.
 
 ## Codex Goal guidance
 
@@ -395,14 +552,15 @@ See [`INSTALL_CODEX.md`](INSTALL_CODEX.md) for the full installation guide.
 ```text
 .codex/
   prompts/                         Codex /opsx:* commands
-  skills/                          lifecycle and quality skills
+  skills/                          lifecycle, quality, and constitution skills
 adr/
   README.md                        ADR policy and index
-  0001-*.md                        project architecture decision
+  0001-*.md, 0002-*.md, 0003-*.md   project architecture decisions
 openspec/
   config.yaml                      selects schema: intent-driven
   schemas/intent-driven/           project-local schema and templates
   specs/                           canonical specs published by archive
+  README.md                         bridge to root project context
   changes/archive/                 archived implementation changes
 docs/
   lifecycle.md                     concise lifecycle reference
@@ -410,6 +568,9 @@ docs/
 scripts/
   check-overlay                    compatibility smoke check
   install-overlay                  safe no-overwrite installer
+CONSTITUTION.md                     tracked project rules for Codex preflight
+ARCHITECTURE.md                     current architecture snapshot
+.secrets.example.env               tracked variable-name example, no values
 README.md                          English main README
 README.ru.md                       Russian translation
 VERSION                            release version
@@ -435,11 +596,13 @@ Expected result:
 - the smoke check creates, verifies, and removes a temporary
   `zz-smoke-intent-overlay-*` change.
 - goal-guidance requirements remain captured in canonical specs and documented
-  in both README languages.
+  in both README languages;
+- project context guidance is documented, architecture snapshot exists, and local secret files remain
+  ignored/untracked.
 
 ## Version
 
-Current release: `v0.1.0`.
+Current release: `v0.1.1`.
 
 ## License
 

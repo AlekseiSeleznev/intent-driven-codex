@@ -1,25 +1,11 @@
+<!-- Account for relevant CONSTITUTION.md, ARCHITECTURE.md, and in-force ADR rules when defining behavior. These files are Codex-layer context, not OpenSpec artifacts; never include secret values. -->
+
 ## ADDED Requirements
 
-### Requirement: <!-- feature or business rule name -->
-The system MUST <!-- describe the required observable behavior using MUST or SHALL. -->
+### Requirement: <Requirement name>
+<The system SHALL/MUST provide...>
 
-<!-- Optional Gherkin-style context, for example:
-Feature: <capability>
-Rule: <business rule>
--->
-
-#### Scenario: <!-- scenario name -->
-- **GIVEN** <!-- starting context -->
-- **WHEN** <!-- action or event -->
-- **THEN** <!-- observable outcome -->
-
-## MODIFIED Requirements
-
-<!-- Copy the full existing requirement block from openspec/specs/<capability>/spec.md, then edit it so it represents the full desired behavior after the change. -->
-
-## REMOVED Requirements
-
-### Requirement: <!-- removed feature or business rule name -->
-**Reason**: <!-- why this behavior is removed -->
-
-**Migration**: <!-- how users or systems should adapt -->
+#### Scenario: <Scenario name>
+- **GIVEN** <initial state>
+- **WHEN** <event/action>
+- **THEN** <observable outcome>

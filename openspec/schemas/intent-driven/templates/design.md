@@ -1,6 +1,6 @@
 ## Context
 
-<!-- Background and current state -->
+<!-- Background and current state, including relevant CONSTITUTION.md, ARCHITECTURE.md, and in-force ADR constraints when present. Do not include secret values. -->
 
 ## Goals / Non-Goals
 
@@ -12,7 +12,7 @@
 
 ## Decisions
 
-<!-- Key design decisions and rationale -->
+<!-- Key design decisions and rationale, including how relevant constitution/architecture rules are preserved or why user direction is needed. -->
 
 ## Risks / Trade-offs
 
@@ -24,4 +24,4 @@
 
 ## Open Questions
 
-<!-- Outstanding decisions, including any in-force ADRs that need supersession -->
+<!-- Outstanding decisions, including any in-force ADRs that need supersession or ARCHITECTURE.md updates -->

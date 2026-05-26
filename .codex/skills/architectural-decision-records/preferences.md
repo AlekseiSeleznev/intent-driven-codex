@@ -1,6 +1,6 @@
 # ADR Preferences
 
-preferred-style: unset
+preferred-style: custom
 
 When unset, ask the user which ADR style to use and remember:
 

@@ -1,15 +1,16 @@
 # context-aware-review Specification
 
 ## Purpose
-TBD - created by archiving change implement-intent-driven-codex-template. Update Purpose after archive.
+Defines context-aware review, scenario quality, C4 diagram guidance, and use of persistent project context during review.
+
 ## Requirements
 ### Requirement: Proposal review uses grill-with-docs
-The workflow SHALL use `grill-with-docs` instead of plain `grill-me` when proposal scope, risk, assumptions, or Brownfield context require review.
+The workflow SHALL use `grill-with-docs` instead of plain `grill-me` when proposal scope, risk, assumptions, Brownfield context, or project context architecture changes require review.
 
 #### Scenario: Review reads available context
 - **GIVEN** a proposal draft exists for a change
 - **WHEN** Codex invokes proposal review
-- **THEN** Codex reads relevant OpenSpec artifacts, project documents, ADRs, and code before asking review questions
+- **THEN** Codex reads relevant OpenSpec artifacts, `CONSTITUTION.md`, `ARCHITECTURE.md`, project documents, ADRs, and code before asking review questions
 
 #### Scenario: Review asks focused questions
 - **GIVEN** the review identifies multiple uncertainties
@@ -27,7 +28,7 @@ The workflow MUST apply Gherkin authoring guidance to OpenSpec Markdown specs so
 - **AND** it avoids private implementation details unless they are part of the contract
 
 ### Requirement: Design uses C4 guidance when boundaries are non-trivial
-The workflow SHALL use C4-style diagramming guidance when a change affects multiple components, services, integrations, runtime units, or deployment boundaries.
+The workflow SHALL use C4-style diagramming guidance when a change affects multiple components, services, integrations, runtime units, deployment boundaries, project context architecture, or durable architecture summaries.
 
 #### Scenario: Design includes minimal useful C4 view
 - **GIVEN** a change affects more than one runtime or architectural boundary
@@ -47,4 +48,3 @@ The workflow SHALL allow `grill-with-docs` to review `design.md` before ADR and 
 - **GIVEN** design review finds a contradiction with specs or ADRs
 - **WHEN** Codex reports the review result
 - **THEN** Codex proposes exact updates to the affected artifacts before tasks are created
-

@@ -9,6 +9,9 @@ metadata:
   generatedBy: "1.3.1"
 ---
 
+**Project context preflight before workflow actions**: before this skill takes a workflow action, follow the `project-constitution` skill. Read root `CONSTITUTION.md` when present, enforce relevant project rules, stop on material conflicts, and follow the strict missing-constitution bootstrap/diagnostic policy. For architecture-sensitive work, also read `ARCHITECTURE.md`, `adr/README.md`, and relevant in-force `adr/*.md`. Read `.secrets.local.env` only when the current workflow actually needs a listed external system, and never reveal secret values.
+
+
 Propose a new change - create the change and generate all artifacts in one step.
 
 I'll create a change with artifacts as defined by the active schema. For the bundled intent-driven schema this is:

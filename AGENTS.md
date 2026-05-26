@@ -10,6 +10,33 @@ proposal -> specs -> design -> adr -> tasks -> apply -> verify -> archive
 
 Do not implement before `tasks.md` is complete and planning artifacts are committed or explicitly overridden.
 
+## Project context and constitution
+
+Before any `/opsx:*` workflow action or direct OpenSpec lifecycle skill action,
+read and respect root `CONSTITUTION.md` when present. Treat it as persistent
+Git-tracked project rules, not as an OpenSpec change artifact. OpenSpec CLI does
+not read it; Codex is responsible for the preflight.
+
+For architecture-sensitive work, also read root `ARCHITECTURE.md`,
+`adr/README.md`, and relevant in-force `adr/*.md`. `ARCHITECTURE.md` is the
+current snapshot; durable rationale stays in ADRs.
+
+If `CONSTITUTION.md` is missing, report that and offer to create it from the
+template or migrate legacy `PROJECT_CONSTITUTION.md` when present. Continue only
+for bootstrap-safe or diagnostic actions such as exploration, project context
+setup, or `/opsx:check-overlay`, unless the user gives an explicit one-time
+override.
+
+If constitution or architecture rules conflict with the request, OpenSpec
+artifacts, intended implementation, external-system access, or verification
+rules, stop before file changes or external calls and ask the user how to
+resolve the conflict.
+
+Secret values belong only in local `.secrets.local.env` or the local
+environment. Git-tracked files may contain variable names and empty placeholders
+only. Never print, stage, commit, archive, or copy real logins, passwords,
+tokens, private URLs, or other secret values.
+
 ## Codex commands
 
 Prefer the installed `/opsx:*` prompts:
@@ -53,6 +80,7 @@ Use these when their conditions are met:
 - `gherkin-authoring` for OpenSpec scenario quality;
 - `c4-diagrams` for non-trivial boundaries/integrations;
 - `architectural-decision-records` for durable ADR decisions;
+- `project-constitution` before `/opsx:*` workflows and substantial project work;
 - `openspec-git-discipline` whenever lifecycle state and git history interact.
 
 ## Git discipline
@@ -63,7 +91,7 @@ Overrides are one-time and must name the bypassed gate, trusted files/state, acc
 
 ## ADRs
 
-Every intent-driven change has `openspec/changes/<change>/adr.md`. Durable ADRs live in `adr/NNNN-kebab-title.md`. Do not rewrite accepted ADR history; supersede with a new ADR.
+Every intent-driven change has `openspec/changes/<change>/adr.md`. Durable ADRs live in `adr/NNNN-kebab-title.md`. Do not rewrite accepted ADR history; supersede with a new ADR. Update `ARCHITECTURE.md` when a durable decision changes the current architecture snapshot.
 
 ## Update safety
 

@@ -18,9 +18,16 @@ artifacts:
         Modified capabilities must use existing names from `openspec/specs/`.
       - **Impact**: Affected code, APIs, dependencies, docs, or systems.
 
-      Research existing specs before filling the Capabilities section. Keep the
-      proposal focused on intent and scope; implementation details belong in
-      design.md.
+      Research existing specs before filling the Capabilities section. Also
+      account for relevant root `CONSTITUTION.md` rules, root
+      `ARCHITECTURE.md` context, and in-force ADR decisions when present, such
+      as required technologies, MCP/external-system boundaries, documentation
+      sources, verification rules, architecture constraints, and additional AI
+      instructions. Treat these files as Codex-layer project context, not as
+      OpenSpec artifacts, and never copy secret values into artifacts.
+
+      Keep the proposal focused on intent and scope; implementation details
+      belong in design.md.
     requires: []
 
   - id: specs
@@ -46,6 +53,13 @@ artifacts:
       For MODIFIED requirements, copy the entire existing requirement block
       from `openspec/specs/<capability>/spec.md` and edit it to represent the
       full desired behavior after the change. Do not use partial diffs.
+
+      Account for relevant root `CONSTITUTION.md` rules, root
+      `ARCHITECTURE.md`, and in-force ADR decisions when present and avoid
+      requirements that contradict project-wide technology, architecture,
+      external-system, documentation, verification, or AI operating constraints.
+      These context files are not OpenSpec artifacts and secret values must not
+      appear in specs.
     requires:
       - proposal
 
@@ -57,10 +71,14 @@ artifacts:
       Create the design document that explains HOW to implement the behavior
       defined in specs.
 
-      Before writing, read proposal.md, all delta specs, and top-level `adr/*.md`
-      when present. Build the in-force ADR set by following supersession links.
-      If an in-force ADR should be revisited, do not edit it; record the need
-      under Open Questions so the ADR step can create a superseding ADR.
+      Before writing, read proposal.md, all delta specs, relevant root
+      `CONSTITUTION.md` rules when present, root `ARCHITECTURE.md` when present,
+      and top-level `adr/*.md` when present. Build the in-force ADR set by
+      following supersession links. If an in-force ADR should be revisited, do
+      not edit it; record the need under Open Questions so the ADR step can
+      create a superseding ADR. If constitution or architecture rules conflict
+      with the planned approach, pause for user direction rather than designing
+      around the conflict silently.
 
       Include context, goals/non-goals, technical decisions with alternatives,
       risks/trade-offs, migration/rollback notes, and open questions. Use C4
@@ -80,15 +98,19 @@ artifacts:
       change. This artifact is required for every change, even when no durable
       ADR is needed.
 
-      Read design.md and top-level `adr/*.md` when present. Determine currently
-      in-force ADRs by following supersession links. List evaluated decisions,
-      existing in-force ADRs considered, durable ADRs created, superseded ADRs,
-      and no-ADR rationale.
+      Read design.md, relevant root `CONSTITUTION.md` rules when present, root
+      `ARCHITECTURE.md` when present, and top-level `adr/*.md` when present.
+      Determine currently in-force ADRs by following supersession links. List
+      evaluated decisions, existing in-force ADRs and constitution/architecture
+      constraints considered, durable ADRs created, superseded ADRs, and no-ADR
+      rationale.
 
       If a durable architectural decision is needed, create a new append-only
       file in top-level `adr/NNNN-kebab-title.md`. Do not rewrite accepted ADRs.
       If a decision replaces a prior one, create a new ADR that supersedes the
-      old ADR and reference that relationship from this review.
+      old ADR and reference that relationship from this review. If current
+      architecture changes, include an implementation task to update
+      `ARCHITECTURE.md`.
     requires:
       - design
 
@@ -104,8 +126,12 @@ artifacts:
       headings. Order tasks by dependency and make each task verifiable.
 
       Reference proposal for intent, specs for behavior, design for approach,
-      per-change adr.md for ADR review, and top-level `adr/*.md` for durable
-      architectural commitments.
+      per-change adr.md for ADR review, top-level `adr/*.md` for durable
+      architectural commitments, root `ARCHITECTURE.md` for the current
+      architecture snapshot, and relevant root `CONSTITUTION.md` rules for
+      project-wide constraints. Include implementation or verification tasks
+      needed to preserve constitution and architecture rules, while keeping real
+      secret values out of tracked files.
     requires:
       - specs
       - design
@@ -116,7 +142,14 @@ apply:
     - tasks
   tracks: tasks.md
   instruction: |
-    Read all context files from OpenSpec, then read top-level adr/*.md when
-    present. Work through pending tasks, keep changes scoped, and mark tasks
-    complete as they are verified. Pause on blockers, unclear requirements, or
-    artifact mismatches.
+    Run the project context preflight before implementation work,
+    goal handoff, external-system access, or verification-sensitive actions.
+    Read all context files from OpenSpec, then read relevant root
+    CONSTITUTION.md rules, root ARCHITECTURE.md context, and top-level adr/*.md
+    when present. Treat constitution and architecture files as Codex-layer
+    project context, not OpenSpec artifacts. Read .secrets.local.env only when
+    the current workflow actually needs a listed external system, and never
+    reveal secret values. Work through pending tasks, keep changes scoped, and
+    mark tasks complete as they are verified. Pause on blockers, unclear
+    requirements, constitution/architecture conflicts, missing required
+    credentials, or artifact mismatches.

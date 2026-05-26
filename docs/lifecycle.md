@@ -10,18 +10,58 @@
 | adr | `openspec/changes/<change>/adr.md` | design | Per-change ADR review. |
 | tasks | `openspec/changes/<change>/tasks.md` | specs, design, adr | Verifiable implementation checklist. |
 
+`CONSTITUTION.md` and `ARCHITECTURE.md` are intentionally not in this artifact
+graph. They are persistent project context for Codex, not OpenSpec change
+artifacts, and they are not archived with changes.
+
 ## Runtime sequence
 
-| Phase | Codex command | OpenSpec calls | Gate |
+| Phase | Codex command | OpenSpec calls | Project context preflight and gate |
 |---|---|---|---|
-| Explore | `/opsx:explore` | usually none | no implementation |
-| New | `/opsx:new` | `openspec new change`, `status`, `instructions proposal` | checkpoint scaffold |
-| Continue | `/opsx:continue` | `status`, `instructions <artifact>` | checkpoint artifact |
-| Fast propose | `/opsx:propose` | repeated `instructions <artifact>` | checkpoint every artifact |
-| Apply | `/opsx:apply` | `status`, `instructions apply`, goal preflight, context read | planning committed; optional Goal hand-off before implementation edits |
-| Bulk apply | `/opsx:bulk-apply` | `list`, per-change `status`, per-change `instructions apply`, parent goal preflight | 2+ executable changes; optional parent Goal before worktrees/subagents |
-| Verify | `/opsx:verify` | `instructions apply`, tests, validation | no critical issues |
-| Archive | `/opsx:archive` | validate/archive/sync | integrated implementation |
+| Explore | `/opsx:explore` | usually none | May run without complete context as diagnostic/exploration, while reporting setup guidance. |
+| New | `/opsx:new` | `openspec new change`, `status`, `instructions proposal` | Read constitution first; if missing, only context/setup changes may proceed without override. |
+| Continue | `/opsx:continue` | `status`, `instructions <artifact>` | Read constitution and relevant architecture context before artifact work; stop on conflicts before writing files. |
+| Fast propose | `/opsx:propose` | repeated `instructions <artifact>` | Read project context before planning; checkpoint every artifact. |
+| Apply | `/opsx:apply` | `status`, `instructions apply`, goal preflight, context read | Read constitution, architecture, and ADR context before goal hand-off or implementation; planning committed; optional Goal before edits. |
+| Bulk apply | `/opsx:bulk-apply` | `list`, per-change `status`, per-change `instructions apply`, parent goal preflight | Read project context before worktrees/subagents; require 2+ executable changes. |
+| Verify | `/opsx:verify` | `instructions apply`, tests, validation | Read constitution verification rules and architecture/ADR constraints; stop on missing credentials or conflicts. |
+| Archive | `/opsx:archive` | validate/archive/sync | Read project context first; do not archive `CONSTITUTION.md`, `ARCHITECTURE.md`, or local secrets. |
+
+## Project context preflight
+
+Codex runs the project context preflight before `/opsx:*` workflow actions and
+direct OpenSpec lifecycle skill actions. The preflight reads `CONSTITUTION.md`
+when present and applies relevant project rules for required technologies, MCP
+servers, external systems, secret handling, documentation sources, verification
+rules, and additional AI instructions.
+
+For architecture-sensitive work, Codex also reads `ARCHITECTURE.md`,
+`adr/README.md`, and relevant in-force `adr/*.md` files. The architecture file is
+a current snapshot; ADRs remain the durable rationale.
+
+Missing context behavior is strict but not deadlocking:
+
+- exploration/read-only diagnostics may continue;
+- creating or repairing the constitution or architecture snapshot may continue;
+- `/opsx:check-overlay` may continue and report missing files as setup guidance;
+- dependent planning, apply, verify, sync, archive, and bulk workflows stop
+  unless the user gives an explicit one-time override.
+
+If `CONSTITUTION.md` is missing but legacy `PROJECT_CONSTITUTION.md` exists,
+Codex treats the legacy file only as migration input and does not maintain both
+files as competing active rule sources.
+
+Conflict behavior is also strict. If constitution or architecture rules
+contradict the user request, OpenSpec artifacts, an intended implementation
+action, external-system access, or required verification, Codex stops before
+modifying files or calling external systems and asks the user to resolve the
+conflict.
+
+Secret values are handled outside the lifecycle. The constitution may list
+credential variable names, but real values belong only in ignored
+`.secrets.local.env` or local environment variables. Codex reads those values
+only when the current workflow actually needs a listed external system and must
+never print, stage, commit, archive, or copy them.
 
 ## Goal-guidance preflight
 
@@ -34,7 +74,8 @@ and context is known, but before implementation file edits. It prints a
 copy-paste `/goal` prompt and stops when the change has several pending tasks,
 material design/ADR constraints, multiple checkpoint boundaries, external
 dependencies, generated assets, migrations, or long-running verification. Small,
-local applies may continue directly.
+local applies may continue directly, and explicit user direction can bypass goal
+handoff for the current run.
 
 `/opsx:bulk-apply <changes...>` evaluates parent goal guidance after executable
 changes are known, but before worktree creation or subagent dispatch. For two or

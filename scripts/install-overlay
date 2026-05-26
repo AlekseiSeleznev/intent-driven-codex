@@ -61,6 +61,10 @@ copy_tree_no_overwrite() {
 copy_tree_no_overwrite ".codex/prompts"
 copy_tree_no_overwrite ".codex/skills"
 copy_tree_no_overwrite "openspec/schemas/intent-driven"
+copy_file_no_overwrite "$SOURCE/CONSTITUTION.md" "CONSTITUTION.md"
+copy_file_no_overwrite "$SOURCE/ARCHITECTURE.md" "ARCHITECTURE.md"
+copy_file_no_overwrite "$SOURCE/.secrets.example.env" ".secrets.example.env"
+copy_file_no_overwrite "$SOURCE/openspec/README.md" "openspec/README.md"
 copy_file_no_overwrite "$SOURCE/scripts/check-overlay" "scripts/check-overlay"
 copy_file_no_overwrite "$SOURCE/AGENTS.md" "AGENTS.md"
 copy_file_no_overwrite "$SOURCE/docs/lifecycle.md" "docs/intent-driven-lifecycle.md"
@@ -87,6 +91,7 @@ schema: intent-driven
 context: |
   This project uses Codex-native intent-driven development with OpenSpec.
   Workflow: proposal -> specs -> design -> adr -> tasks.
+  Codex reads CONSTITUTION.md and ARCHITECTURE.md as project context; OpenSpec CLI does not.
 
 rules:
   proposal:
@@ -95,9 +100,9 @@ rules:
   specs:
     - Use OpenSpec delta sections and Gherkin-style scenarios in Markdown.
   design:
-    - Use C4-style diagrams for non-trivial boundaries or explain why none is needed.
+    - Use C4-style diagrams for non-trivial boundaries or explain why none is needed; account for ARCHITECTURE.md and in-force ADRs.
   adr:
-    - Durable ADRs live in top-level adr/ and are append-only.
+    - Durable ADRs live in top-level adr/ and are append-only; update ARCHITECTURE.md when current architecture changes.
   tasks:
     - Create dependency-ordered checkbox tasks based on proposal/specs/design/ADR.
 CONFIGEOF

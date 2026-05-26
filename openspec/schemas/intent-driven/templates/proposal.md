@@ -1,23 +1,15 @@
 ## Why
 
-<!-- Explain the motivation for this change. What problem does this solve? Why now? -->
+<!-- 1-2 sentences explaining the problem, opportunity, or user intent. -->
 
 ## What Changes
 
-<!-- Describe what will change. Be specific about new capabilities, modifications, or removals. -->
+<!-- Bullet list of concrete changes. Mark breaking changes with **BREAKING**. -->
 
 ## Capabilities
 
-### New Capabilities
-<!-- Capabilities being introduced. Replace <name> with kebab-case identifier (e.g., user-auth, data-export, api-rate-limiting). Each creates specs/<name>/spec.md with OpenSpec delta headers and Gherkin-style scenarios. -->
-- `<name>`: <brief description of what this capability covers>
-
-### Modified Capabilities
-<!-- Existing capabilities whose behaviour is changing (not just implementation).
-     Only list here if spec-level behaviour changes. Each needs a delta spec.md file.
-     Use existing spec names from openspec/specs/. Leave empty if no requirement changes. -->
-- `<existing-name>`: <what behaviour is changing>
+<!-- List new/modified capabilities. New capabilities should become specs/<capability>/spec.md. -->
 
 ## Impact
 
-<!-- Affected code, APIs, dependencies, systems -->
+<!-- Affected code, APIs, dependencies, systems, and relevant CONSTITUTION.md / ARCHITECTURE.md / ADR constraints such as required technologies, MCP/external systems, documentation, architecture, or verification rules. Use variable names only; never include secret values. -->

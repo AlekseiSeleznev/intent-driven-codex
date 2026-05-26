@@ -1,7 +1,8 @@
 # git-discipline Specification
 
 ## Purpose
-TBD - created by archiving change implement-intent-driven-codex-template. Update Purpose after archive.
+Defines mandatory Git checkpoint, approval, branch, merge, push, and archive discipline for intent-driven OpenSpec lifecycle work.
+
 ## Requirements
 ### Requirement: Every lifecycle step ends with a git checkpoint
 The workflow MUST require a git checkpoint after each OpenSpec lifecycle state change before a dependent lifecycle phase proceeds.

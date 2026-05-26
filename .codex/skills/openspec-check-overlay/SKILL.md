@@ -5,6 +5,9 @@ license: MIT
 compatibility: Requires OpenSpec CLI 1.3.x or compatible public commands.
 ---
 
+**Project context preflight before workflow actions**: before this skill takes a workflow action, follow the `project-constitution` skill. Read root `CONSTITUTION.md` when present, enforce relevant project rules, stop on material conflicts, and follow the strict missing-constitution bootstrap/diagnostic policy. For architecture-sensitive work, also read `ARCHITECTURE.md`, `adr/README.md`, and relevant in-force `adr/*.md`. Read `.secrets.local.env` only when the current workflow actually needs a listed external system, and never reveal secret values.
+
+
 # OpenSpec Overlay Check
 
 Validate the project-local `intent-driven` overlay without patching OpenSpec. Prefer `scripts/check-overlay` when present; otherwise follow the manual steps below.

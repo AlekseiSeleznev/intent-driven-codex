@@ -3,6 +3,11 @@ description: Create a new OpenSpec change and generate planning artifacts up to 
 argument-hint: change name or description
 ---
 
+Project constitution preflight:
+- Before this workflow takes action, use skill `project-constitution` to read and enforce root `CONSTITUTION.md`. For architecture-sensitive work, also read `ARCHITECTURE.md`, `adr/README.md`, and relevant in-force `adr/*.md`.
+- If the constitution is missing, follow the bootstrap-safe/diagnostic rules from that skill; otherwise stop unless the user gives an explicit one-time override.
+- Do not read `.secrets.local.env` unless this workflow actually needs a listed external system, and never reveal secret values.
+
 Use skill `openspec-propose` to create a change and generate planning artifacts. For review, use `grill-with-docs`; do not use the plain review skill.
 
 Intent-driven adaptation:
