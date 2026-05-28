@@ -1,0 +1,209 @@
+name: intent-driven
+version: 1
+description: Intent-driven OpenSpec workflow for Codex - proposal -> specs -> design -> review -> adr -> test-plan -> tasks
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Initial proposal document outlining the change intent
+    template: proposal.md
+    instruction: >
+      Create the proposal document that establishes WHY this change is needed.
+
+      Sections:
+      - **Why**: 1-2 sentences on the problem or opportunity.
+      - **What Changes**: Bullet list of concrete changes. Mark breaking changes
+        with **BREAKING**.
+      - **Capabilities**: Identify behavior specs to create or modify.
+        New capabilities become `specs/<capability>/spec.md` files.
+        Modified capabilities must use existing names from `openspec/specs/`.
+      - **Impact**: Affected code, APIs, dependencies, docs, or systems.
+
+      Research existing specs before filling the Capabilities section. Also
+      account for relevant root `CONSTITUTION.md` rules, root
+      `ARCHITECTURE.md` context, and in-force ADR decisions when present, such
+      as required technologies, MCP/external-system boundaries, documentation
+      sources, verification rules, architecture constraints, and additional AI
+      instructions. Treat these files as Codex-layer project context, not as
+      OpenSpec artifacts, and never copy secret values into artifacts.
+
+      Keep the proposal focused on intent and scope; implementation details
+      belong in design.md.
+    requires: []
+
+  - id: specs
+    generates: specs/**/*.md
+    description: OpenSpec Markdown specs with normative requirements and Gherkin-style scenarios
+    template: spec.md
+    instruction: >
+      Create one OpenSpec Markdown delta spec per capability listed in the
+      proposal. Use `specs/<capability>/spec.md`.
+
+      Use OpenSpec delta headers exactly:
+      - `## ADDED Requirements`
+      - `## MODIFIED Requirements`
+      - `## REMOVED Requirements`
+      - `## RENAMED Requirements`
+
+      Each requirement MUST use `### Requirement: <name>` and MUST include
+      normative requirement prose with `MUST` or `SHALL` before scenarios.
+      Every requirement MUST have at least one `#### Scenario: <name>` block.
+      Scenarios should be Gherkin-style observable behavior with `GIVEN`,
+      `WHEN`, `THEN`, and optional `AND`/`BUT` steps.
+
+      For MODIFIED requirements, copy the entire existing requirement block
+      from `openspec/specs/<capability>/spec.md` and edit it to represent the
+      full desired behavior after the change. Do not use partial diffs.
+
+      Account for relevant root `CONSTITUTION.md` rules, root
+      `ARCHITECTURE.md`, and in-force ADR decisions when present and avoid
+      requirements that contradict project-wide technology, architecture,
+      external-system, documentation, verification, or AI operating constraints.
+      These context files are not OpenSpec artifacts and secret values must not
+      appear in specs.
+    requires:
+      - proposal
+
+  - id: design
+    generates: design.md
+    description: Technical design document with implementation approach, trade-offs, and boundaries
+    template: design.md
+    instruction: >
+      Create the design document that explains HOW to implement the behavior
+      defined in specs.
+
+      Before writing, read proposal.md, all delta specs, relevant root
+      `CONSTITUTION.md` rules when present, root `ARCHITECTURE.md` when present,
+      and top-level `adr/*.md` when present. Build the in-force ADR set by
+      following supersession links. If an in-force ADR should be revisited, do
+      not edit it; record the need under Open Questions so the ADR step can
+      create a superseding ADR. If constitution or architecture rules conflict
+      with the planned approach, pause for user direction rather than designing
+      around the conflict silently.
+
+      Include context, goals/non-goals, technical decisions with alternatives,
+      risks/trade-offs, migration/rollback notes, and open questions. Use C4
+      style ASCII or Mermaid diagrams when boundaries, integrations, runtime
+      units, or deployment shape are non-trivial; otherwise state why no diagram
+      is needed.
+    requires:
+      - proposal
+      - specs
+
+  - id: review
+    generates: review.md
+    description: Mandatory context-aware grill-with-docs review before ADR planning
+    template: review.md
+    instruction: >
+      Create `openspec/changes/<change>/review.md` as the mandatory
+      context-aware review gate for development and enhancement changes.
+
+      Use `grill-with-docs` guidance rather than a plain review flow. Before
+      writing, read proposal.md, all delta specs, design.md, relevant root
+      `CONSTITUTION.md`, root `ARCHITECTURE.md`, top-level `adr/*.md`, project
+      docs, and relevant code when those files can answer material questions.
+      Summarize the plan, identify the highest-risk uncertainties, record any
+      focused questions and recommended answers, capture user answers when
+      needed, and list exact artifact updates required or already integrated.
+
+      Do not ask ceremonial questions. If no material uncertainty remains after
+      reading the available context, record that conclusion and the remaining
+      risks. If review findings change scope, behavior, approach, durable ADR
+      planning, or verification expectations, update or explicitly require
+      updates to proposal/specs/design before ADR planning proceeds.
+    requires:
+      - design
+
+  - id: adr
+    generates: adr.md
+    description: Per-change ADR review with optional durable ADR references
+    template: adr.md
+    instruction: >
+      Create `openspec/changes/<change>/adr.md` as the ADR review gate for this
+      change. This artifact is required for every change, even when no durable
+      ADR is needed.
+
+      Read review.md, design.md, relevant root `CONSTITUTION.md` rules when
+      present, root `ARCHITECTURE.md` when present, and top-level `adr/*.md`
+      when present. Determine currently in-force ADRs by following supersession
+      links. List evaluated decisions, review findings considered, existing
+      in-force ADRs and constitution/architecture constraints considered,
+      durable ADRs created, superseded ADRs, architecture snapshot updates, and
+      no-ADR rationale.
+
+      If a durable architectural decision is needed, create a new append-only
+      file in top-level `adr/NNNN-kebab-title.md`. Do not rewrite accepted ADRs.
+      If a decision replaces a prior one, create a new ADR that supersedes the
+      old ADR and reference that relationship from this review. If current
+      architecture changes, include an implementation task to update
+      `ARCHITECTURE.md`.
+    requires:
+      - review
+
+  - id: test-plan
+    generates: test-plan.md
+    description: TDD or verification-first plan before implementation tasks
+    template: test-plan.md
+    instruction: >
+      Create `openspec/changes/<change>/test-plan.md` before implementation
+      tasks are written.
+
+      Read proposal.md, all delta specs, design.md, review.md, adr.md,
+      relevant root `CONSTITUTION.md` verification rules, root
+      `ARCHITECTURE.md`, and in-force ADR constraints. Map requirements and
+      scenarios to automated or manual verification methods. Prefer classic
+      test-first TDD when an executable check can be written before production
+      implementation. When classic TDD is not feasible for the technology stack
+      or change type, document the strongest available verification-first
+      substitute and the limitation.
+
+      Include required checks before apply completion and before archive. The
+      later tasks artifact must order test-first or verification-first work
+      before or alongside production changes.
+    requires:
+      - adr
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist with dependency-ordered checkbox tasks
+    template: tasks.md
+    instruction: >
+      Create the task list that breaks down the implementation work.
+
+      Each task MUST be a checkbox in the form `- [ ] X.Y Task description` so
+      the apply phase can track progress. Group related tasks under numbered
+      headings. Order tasks by dependency and make each task verifiable.
+
+      Reference proposal for intent, specs for behavior, design for approach,
+      review.md for context-aware review resolutions, per-change adr.md for ADR
+      review, test-plan.md for TDD or verification-first ordering, top-level
+      `adr/*.md` for durable architectural commitments, root `ARCHITECTURE.md`
+      for the current architecture snapshot, and relevant root
+      `CONSTITUTION.md` rules for project-wide constraints. Include
+      implementation or verification tasks needed to preserve constitution,
+      architecture, review, ADR, and test-plan rules, while keeping real secret
+      values out of tracked files.
+    requires:
+      - specs
+      - design
+      - review
+      - adr
+      - test-plan
+
+apply:
+  requires:
+    - tasks
+  tracks: tasks.md
+  instruction: |
+    Run the project context preflight before implementation work,
+    goal handoff, external-system access, or verification-sensitive actions.
+    Read all context files from OpenSpec, including review.md and test-plan.md,
+    then read relevant root CONSTITUTION.md rules, root ARCHITECTURE.md context,
+    and top-level adr/*.md when present. Treat constitution and architecture
+    files as Codex-layer project context, not OpenSpec artifacts. Read
+    .secrets.local.env only when the current workflow actually needs a listed
+    external system, and never reveal secret values. Work through pending tasks,
+    keep changes scoped, follow review resolutions and test-plan verification
+    ordering, and mark tasks complete only as they are verified. Pause on
+    blockers, unclear requirements, unresolved review findings,
+    constitution/architecture conflicts, missing required credentials,
+    verification limitations, or artifact mismatches.

@@ -1,0 +1,37 @@
+---
+description: Continue an OpenSpec change by creating exactly one ready artifact
+argument-hint: optional change name
+---
+
+Project constitution preflight:
+- Before this workflow takes action, use skill `project-constitution` to read and enforce root `CONSTITUTION.md`. For architecture-sensitive work, also read `ARCHITECTURE.md`, `adr/README.md`, and relevant in-force `adr/*.md`.
+- If the constitution is missing, follow the bootstrap-safe/diagnostic rules from that skill; otherwise stop unless the user gives an explicit one-time override.
+- Do not read `.secrets.local.env` unless this workflow actually needs a listed external system, and never reveal secret values.
+
+Use skill `openspec-continue-change` to create the next ready artifact.
+
+Intent-driven policy:
+- Create exactly one artifact per invocation.
+- Follow OpenSpec status and instructions.
+- If multiple artifacts are ready, prefer the schema order from `openspec status --change <name> --json` and the intent-driven lifecycle: `proposal -> specs -> design -> review -> adr -> test-plan -> tasks`.
+- Read dependency files before creating the artifact.
+
+
+Artifact support skills:
+- For `specs`, recommend `gherkin-authoring` and preserve OpenSpec Markdown as the source of truth.
+- For `design`, recommend `c4-diagrams` when boundaries/integrations are non-trivial; otherwise record an explicit no-diagram rationale.
+- For `review`, use `grill-with-docs` to create the mandatory context-aware review artifact; do not use the plain review skill.
+- For `adr`, recommend `architectural-decision-records`, read `review.md`, and preserve append-only durable ADR supersession rules.
+- For `test-plan`, define TDD when feasible or the strongest verification-first substitute before tasks.
+
+Git discipline:
+- Before writing, identify the next artifact and verify dependency artifacts are already committed or explicitly covered by the user override.
+1. Before creating a dependent artifact, run `git status --short`.
+2. If prior artifact changes are uncommitted, stop and propose a checkpoint unless the user explicitly overrides.
+3. After writing the artifact, run `openspec status --change <name>` and `git status --short`.
+4. Propose a checkpoint and stop.
+
+Guardrails:
+- Do not skip artifacts.
+- Do not create more than one artifact.
+- Do not commit unless the user explicitly approves.
