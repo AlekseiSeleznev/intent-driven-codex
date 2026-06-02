@@ -1,0 +1,724 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+KEEP_SMOKE=0
+RUN_SMOKE=1
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/check-overlay [--no-smoke] [--keep-smoke]
+
+Checks the Codex intent-driven OpenSpec overlay without patching OpenSpec.
+By default it creates a temporary zz-smoke-intent-overlay-* change, verifies
+expanded intent-driven status/apply context, and safely removes only that smoke change.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-smoke) RUN_SMOKE=0 ;;
+    --keep-smoke) KEEP_SMOKE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# Prefer the current directory when it already looks like an OpenSpec overlay
+# root. This keeps global/template installs under a parent Git repository from
+# accidentally resolving to that parent repository.
+PWD_ROOT="$(pwd)"
+if [[ -f "$PWD_ROOT/openspec/config.yaml" && -d "$PWD_ROOT/openspec/schemas/intent-driven" ]]; then
+  ROOT="$PWD_ROOT"
+else
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
+cd "$ROOT" || exit 1
+
+SMOKE_CHANGE=""
+SMOKE_DIR=""
+CREATED_SMOKE=0
+
+fail() {
+  local layer="$1"
+  shift
+  echo "✗ [$layer] $*" >&2
+  exit 1
+}
+
+pass() {
+  local layer="$1"
+  shift
+  echo "✓ [$layer] $*"
+}
+
+if [[ -f "$ROOT/CONSTITUTION.md" ]]; then
+  pass "project constitution" "CONSTITUTION.md present"
+else
+  echo "! [project constitution] CONSTITUTION.md missing; continuing overlay diagnostics"
+  LEGACY_PROJECT_CONSTITUTION="$ROOT/PROJECT_CONSTITUTION.md"
+  if [[ -f "$LEGACY_PROJECT_CONSTITUTION" ]]; then
+    echo "! [project constitution] legacy PROJECT_CONSTITUTION.md found; migrate/rename it to CONSTITUTION.md"
+  else
+    echo "! [project constitution] create CONSTITUTION.md before dependent /opsx workflows"
+  fi
+fi
+
+if [[ -f "$ROOT/ARCHITECTURE.md" ]]; then
+  pass "project architecture" "ARCHITECTURE.md present"
+else
+  echo "! [project architecture] ARCHITECTURE.md missing; continuing overlay diagnostics"
+  echo "! [project architecture] create it as the current architecture snapshot for new chats"
+fi
+
+if [[ -f "$ROOT/openspec/README.md" ]]; then
+  pass "OpenSpec bridge" "openspec/README.md present"
+else
+  echo "! [OpenSpec bridge] openspec/README.md missing; add it to explain persistent project context"
+fi
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  TRACKED_LOCAL_SECRETS="$(git ls-files -- '.secrets.local.env' '.secrets.*.local.env' '.env.local' '.env.*.local' 2>/dev/null || true)"
+  if [[ -n "$TRACKED_LOCAL_SECRETS" ]]; then
+    fail "local secrets" "local secret env file is tracked: $(echo "$TRACKED_LOCAL_SECRETS" | tr '\n' ' ')"
+  fi
+  pass "local secrets" "no local secret env files are tracked"
+
+  if git check-ignore --quiet .secrets.local.env 2>/dev/null; then
+    pass "local secrets" ".secrets.local.env is ignored"
+  else
+    echo "! [local secrets] .secrets.local.env is not ignored; add it before storing local credentials"
+  fi
+else
+  echo "! [local secrets] git worktree unavailable; skipping tracked-secret check"
+fi
+
+require_contains() {
+  local path="$1"
+  local needle="$2"
+  local description="$3"
+  [[ -f "$ROOT/$path" ]] || fail "documentation drift" "$path missing"
+  grep -Fq -- "$needle" "$ROOT/$path" || fail "documentation drift" "$description"
+}
+
+require_absent() {
+  local path="$1"
+  local needle="$2"
+  local description="$3"
+  [[ -f "$ROOT/$path" ]] || fail "documentation drift" "$path missing"
+  if grep -Fq -- "$needle" "$ROOT/$path"; then
+    fail "documentation drift" "$description"
+  fi
+}
+
+is_template_doc() {
+  local path="$1"
+  [[ -f "$ROOT/$path" ]] || return 1
+  grep -Eq 'Intent-Driven Codex|intent-driven-codex|Codex-native intent-driven' "$ROOT/$path"
+}
+
+first_existing_path() {
+  local candidate
+  for candidate in "$@"; do
+    if [[ -f "$ROOT/$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+TEMPLATE_README_COUNT=0
+for readme in README.md README.ru.md; do
+  if is_template_doc "$readme"; then
+    TEMPLATE_README_COUNT=$((TEMPLATE_README_COUNT + 1))
+    require_contains "$readme" "scripts/install-overlay /path/to/new-project --force-overlay" "$readme Greenfield install uses --force-overlay"
+    require_contains "$readme" "/opsx:claude-review-status" "$readme documents /opsx:claude-review-status"
+    require_contains "$readme" "/opsx:claude-review-on" "$readme documents /opsx:claude-review-on"
+    require_contains "$readme" "/opsx:claude-review-off" "$readme documents /opsx:claude-review-off"
+    require_contains "$readme" "/opsx:claude-review-reset" "$readme documents /opsx:claude-review-reset"
+    require_contains "$readme" "/opsx:claude-review-set" "$readme documents /opsx:claude-review-set"
+    require_contains "$readme" "openspec list --json" "$readme makes active-change state command-derived"
+    require_contains "$readme" "openspec/changes/archive/" "$readme references archived change directory"
+    require_contains "$readme" "scripts/openspec-session-state" "$readme documents scripts/openspec-session-state"
+    require_contains "$readme" "scripts/openspec-git-checkpoint" "$readme documents scripts/openspec-git-checkpoint"
+    require_contains "$readme" "c4-diagrams" "$readme uses canonical c4-diagrams skill name"
+    require_absent "$readme" 'Active OpenSpec changes | `add-claude-artifact-review`' "$readme contains stale active-change row"
+  else
+    echo "! [documentation drift] $readme is absent or project-owned; skipping template README drift assertions"
+  fi
+done
+
+if [[ "$TEMPLATE_README_COUNT" == "0" ]]; then
+  LIFECYCLE_DOC="$(first_existing_path docs/intent-driven-lifecycle.md docs/lifecycle.md || true)"
+  [[ -n "$LIFECYCLE_DOC" ]] || fail "documentation drift" "intent-driven lifecycle documentation missing"
+  require_contains "$LIFECYCLE_DOC" "scripts/openspec-session-state" "$LIFECYCLE_DOC documents scripts/openspec-session-state"
+  require_contains "$LIFECYCLE_DOC" "/opsx:claude-review-" "$LIFECYCLE_DOC documents Claude review session commands"
+  require_contains "$LIFECYCLE_DOC" "scripts/openspec-git-checkpoint" "$LIFECYCLE_DOC documents checkpoint helper"
+  require_contains "$LIFECYCLE_DOC" "c4-diagrams" "$LIFECYCLE_DOC uses canonical c4-diagrams skill name"
+fi
+
+if is_template_doc INSTALL_CODEX.md; then
+  require_contains INSTALL_CODEX.md "scripts/openspec-claude-review" "INSTALL_CODEX.md documents scripts/openspec-claude-review"
+  require_contains INSTALL_CODEX.md ".codex/openspec-claude-review.json" "INSTALL_CODEX.md documents .codex/openspec-claude-review.json"
+  require_contains INSTALL_CODEX.md "scripts/openspec-session-state" "INSTALL_CODEX.md documents scripts/openspec-session-state"
+  require_contains INSTALL_CODEX.md "scripts/openspec-git-checkpoint" "INSTALL_CODEX.md documents scripts/openspec-git-checkpoint"
+  require_contains INSTALL_CODEX.md ".codex/session/" "INSTALL_CODEX.md documents .codex/session/ ignore guidance"
+  require_absent INSTALL_CODEX.md "cp /path/to/intent-driven-codex/CONSTITUTION.md ./CONSTITUTION.md" "INSTALL_CODEX.md contains blind CONSTITUTION.md copy"
+  require_absent INSTALL_CODEX.md "cp /path/to/intent-driven-codex/ARCHITECTURE.md ./ARCHITECTURE.md" "INSTALL_CODEX.md contains blind ARCHITECTURE.md copy"
+  require_absent INSTALL_CODEX.md "cp /path/to/intent-driven-codex/.secrets.example.env ./.secrets.example.env" "INSTALL_CODEX.md contains blind .secrets.example.env copy"
+else
+  echo "! [documentation drift] INSTALL_CODEX.md is absent or project-owned; skipping template install-guide drift assertions"
+fi
+
+UPDATE_DOC="$(first_existing_path docs/update-safety.md docs/intent-driven-update-safety.md || true)"
+[[ -n "$UPDATE_DOC" ]] || fail "documentation drift" "intent-driven update-safety documentation missing"
+require_contains "$UPDATE_DOC" "scripts/check-overlay" "$UPDATE_DOC documents scripts/check-overlay"
+require_contains "$UPDATE_DOC" "## Claude Review" "$UPDATE_DOC documents mandatory Claude Review user-facing block"
+require_contains "$UPDATE_DOC" "Budget / cost" "$UPDATE_DOC documents Claude review budget/cost output"
+require_absent "$UPDATE_DOC" "script/check-overlay" "$UPDATE_DOC contains obsolete script/check-overlay spelling"
+
+LIFECYCLE_DOC="$(first_existing_path docs/intent-driven-lifecycle.md docs/lifecycle.md || true)"
+[[ -n "$LIFECYCLE_DOC" ]] || fail "documentation drift" "intent-driven lifecycle documentation missing"
+require_contains "$LIFECYCLE_DOC" "## Claude Review" "$LIFECYCLE_DOC documents mandatory Claude Review user-facing block"
+require_contains "$LIFECYCLE_DOC" "Budget / cost" "$LIFECYCLE_DOC documents Claude review budget/cost output"
+require_contains "$LIFECYCLE_DOC" "Вопросов, требующих участия пользователя: нет." "$LIFECYCLE_DOC documents no-user-question wording"
+
+require_claude_review_block_rule() {
+  local path="$1"
+  require_contains "$path" "## Claude Review" "$path requires user-facing Claude Review block"
+  require_contains "$path" "Budget / cost" "$path requires Claude review budget/cost output"
+  require_contains "$path" "maxBudgetUsd" "$path requires configured budget cap output"
+  require_contains "$path" "Вопросов, требующих участия пользователя: нет." "$path requires explicit no-user-question wording"
+  require_contains "$path" "Do not checkpoint while any Claude finding is unhandled" "$path blocks checkpoint on unhandled Claude findings"
+}
+
+for review_rule_file in   .codex/prompts/opsx-apply.md   .codex/prompts/opsx-continue.md   .codex/prompts/opsx-ff.md   .codex/prompts/opsx-propose.md   .codex/skills/openspec-apply-change/SKILL.md   .codex/skills/openspec-continue-change/SKILL.md   .codex/skills/openspec-ff-change/SKILL.md   .codex/skills/openspec-propose/SKILL.md
+do
+  require_claude_review_block_rule "$review_rule_file"
+done
+
+require_contains openspec/config.yaml "context:" "openspec/config.yaml includes context guidance"
+require_contains openspec/config.yaml "grill:" "openspec/config.yaml includes grill rule"
+require_contains openspec/config.yaml "design-review:" "openspec/config.yaml includes design-review rule"
+require_contains openspec/config.yaml "test-plan:" "openspec/config.yaml includes test-plan rule"
+pass "documentation drift" "README, install docs, update docs, Claude review block rules, and config markers are current"
+
+run_layer() {
+  local layer="$1"
+  shift
+  echo "→ [$layer] $*"
+  "$@" || fail "$layer" "command failed: $*"
+}
+
+cleanup() {
+  if [[ "$CREATED_SMOKE" == "1" && "$KEEP_SMOKE" == "0" ]]; then
+    case "$SMOKE_CHANGE" in
+      zz-smoke-intent-overlay-*)
+        if [[ -n "$SMOKE_DIR" && "$SMOKE_DIR" == "$ROOT/openspec/changes/$SMOKE_CHANGE" && -d "$SMOKE_DIR" ]]; then
+          rm -rf "$SMOKE_DIR"
+          echo "✓ [project artifact] removed smoke change $SMOKE_CHANGE"
+        fi
+        ;;
+      *)
+        echo "! [project artifact] refusing cleanup for unexpected smoke name: $SMOKE_CHANGE" >&2
+        ;;
+    esac
+  elif [[ "$CREATED_SMOKE" == "1" ]]; then
+    echo "! [project artifact] kept smoke change at $SMOKE_DIR"
+  fi
+}
+trap cleanup EXIT
+
+command -v openspec >/dev/null 2>&1 || fail "OpenSpec CLI" "openspec executable not found"
+run_layer "OpenSpec CLI" openspec --version
+
+if [[ -x "$ROOT/bin/opsx" && -x "$ROOT/bin/openspec-shim" && -f "$ROOT/manifest.yaml" ]]; then
+  pass "auto-repair tooling" "bin/opsx, bin/openspec-shim, and manifest.yaml present"
+else
+  fail "auto-repair tooling" "bin/opsx, bin/openspec-shim, or manifest.yaml missing"
+fi
+run_layer "auto-repair tooling" python3 -m py_compile bin/opsx bin/openspec-shim
+if [[ -x "$ROOT/scripts/test-auto-repair-tooling" ]]; then
+  pass "auto-repair tooling" "scripts/test-auto-repair-tooling present and executable"
+else
+  fail "auto-repair tooling" "scripts/test-auto-repair-tooling missing or not executable"
+fi
+run_layer "auto-repair tooling" bash -n scripts/test-auto-repair-tooling
+run_layer "auto-repair tooling" scripts/test-auto-repair-tooling all
+
+if [[ -x "$ROOT/scripts/openspec-claude-review" ]]; then
+  pass "Claude review" "scripts/openspec-claude-review present and executable"
+else
+  fail "Claude review" "scripts/openspec-claude-review missing or not executable"
+fi
+[[ -f "$ROOT/.codex/openspec-claude-review.json" ]] || fail "Claude review" ".codex/openspec-claude-review.json missing"
+run_layer "Claude review" bash -n scripts/openspec-claude-review
+run_layer "Claude review" scripts/openspec-claude-review --validate-config >/tmp/check-overlay-claude-config.out
+pass "Claude review" "config validates without contacting Claude"
+
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git check-ignore --quiet .codex/session/openspec-session.json 2>/dev/null; then
+    pass "session state" ".codex/session/openspec-session.json is ignored"
+  else
+    fail "session state" ".codex/session/openspec-session.json is not ignored"
+  fi
+fi
+
+if [[ -x "$ROOT/scripts/openspec-session-state" ]]; then
+  pass "session state" "scripts/openspec-session-state present and executable"
+else
+  fail "session state" "scripts/openspec-session-state missing or not executable"
+fi
+run_layer "session state" bash -n scripts/openspec-session-state
+SESSION_TMP="$(mktemp -d)"
+SESSION_FILE="$SESSION_TMP/session.json"
+run_layer "session state" env CODEX_OPENSPEC_SESSION_FILE="$SESSION_FILE" scripts/openspec-session-state --validate >/tmp/check-overlay-session-validate.out
+run_layer "session state" env CODEX_OPENSPEC_SESSION_FILE="$SESSION_FILE" scripts/openspec-session-state --status >/tmp/check-overlay-session-status.out
+run_layer "session state" env CODEX_OPENSPEC_SESSION_FILE="$SESSION_FILE" scripts/openspec-session-state --claude-review on --set-stage test-plan model=claude-sonnet-4-6 effort=medium budget=none >/tmp/check-overlay-session-set.out
+run_layer "session state" env CODEX_OPENSPEC_SESSION_FILE="$SESSION_FILE" scripts/openspec-session-state --effective-claude-config --out "$SESSION_TMP/effective.json" >/tmp/check-overlay-effective-config.out
+run_layer "session state" scripts/openspec-claude-review --validate-config --config "$SESSION_TMP/effective.json" >/tmp/check-overlay-effective-validate.out
+python3 - <<'PY' "$SESSION_TMP/effective.json" || fail "session state" "budget=none did not disable maxBudgetUsd"
+import json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+value = config.get("stages", {}).get("test-plan", {}).get("maxBudgetUsd")
+if value is not None:
+    raise SystemExit(f"maxBudgetUsd={value!r}, expected null")
+PY
+printf '%s\n' '{"schemaVersion":1,"claudeReview":{"apiToken":"fake-token"}}' > "$SESSION_TMP/bad.json"
+if env CODEX_OPENSPEC_SESSION_FILE="$SESSION_TMP/bad.json" scripts/openspec-session-state --validate >/tmp/check-overlay-bad-session.out 2>/tmp/check-overlay-bad-session.err; then
+  fail "session state" "secret-looking session state was accepted"
+fi
+if grep -q 'fake-token' /tmp/check-overlay-bad-session.err; then
+  fail "session state" "secret-looking validation printed a value"
+fi
+rm -rf "$SESSION_TMP"
+pass "session state" "state validation and effective config generation work without contacting Claude"
+
+if [[ -x "$ROOT/scripts/openspec-git-checkpoint" ]]; then
+  pass "git checkpoint" "scripts/openspec-git-checkpoint present and executable"
+else
+  fail "git checkpoint" "scripts/openspec-git-checkpoint missing or not executable"
+fi
+run_layer "git checkpoint" bash -n scripts/openspec-git-checkpoint
+CHECKPOINT_TMP="$(mktemp -d)"
+git -C "$CHECKPOINT_TMP" init -q
+git -C "$CHECKPOINT_TMP" config user.email test@example.invalid
+git -C "$CHECKPOINT_TMP" config user.name "Test User"
+mkdir -p "$CHECKPOINT_TMP/openspec/changes/demo"
+printf 'x\n' > "$CHECKPOINT_TMP/openspec/changes/demo/test-plan.md"
+git -C "$CHECKPOINT_TMP" add .
+git -C "$CHECKPOINT_TMP" commit -m init >/dev/null
+printf 'y\n' >> "$CHECKPOINT_TMP/openspec/changes/demo/test-plan.md"
+(cd "$CHECKPOINT_TMP" && "$ROOT/scripts/openspec-git-checkpoint" --change demo --stage test-plan --message 'test checkpoint' --dry-run) >/tmp/check-overlay-checkpoint-dry-run.out
+grep -q 'openspec/changes/demo/test-plan.md' /tmp/check-overlay-checkpoint-dry-run.out || fail "git checkpoint" "dry-run did not report allowed test-plan path"
+test "$(git -C "$CHECKPOINT_TMP" rev-list --count HEAD)" = "1" || fail "git checkpoint" "dry-run created a commit"
+mkdir -p "$CHECKPOINT_TMP/.codex"
+printf 'cfg\n' > "$CHECKPOINT_TMP/.codex/config.json"
+(cd "$CHECKPOINT_TMP" && "$ROOT/scripts/openspec-git-checkpoint" --change demo --stage apply-group --message 'hidden include checkpoint' --include openspec/changes/demo/test-plan.md --include .codex/config.json --dry-run) >/tmp/check-overlay-checkpoint-hidden-include.out
+grep -q '.codex/config.json' /tmp/check-overlay-checkpoint-hidden-include.out || fail "git checkpoint" "dry-run did not preserve leading-dot include path"
+printf 'z\n' > "$CHECKPOINT_TMP/unrelated.txt"
+if (cd "$CHECKPOINT_TMP" && "$ROOT/scripts/openspec-git-checkpoint" --change demo --stage test-plan --message 'blocked checkpoint' --dry-run) >/tmp/check-overlay-checkpoint-block.out 2>/tmp/check-overlay-checkpoint-block.err; then
+  fail "git checkpoint" "unrelated dirty path did not block checkpoint"
+fi
+grep -q 'unrelated.txt' /tmp/check-overlay-checkpoint-block.err || fail "git checkpoint" "unrelated dirty path was not reported"
+rm -rf "$CHECKPOINT_TMP"
+pass "git checkpoint" "dry-run allowlist and unrelated dirty-path block work"
+
+SCHEMAS_JSON="$(openspec schemas --json 2>/tmp/check-overlay-schemas.err)" || {
+  cat /tmp/check-overlay-schemas.err >&2
+  fail "OpenSpec CLI" "openspec schemas --json failed"
+}
+SCHEMAS_JSON="$SCHEMAS_JSON" python3 - <<'PY' || fail "local schema" "intent-driven schema is missing or not project-local"
+import json, os
+schemas = json.loads(os.environ['SCHEMAS_JSON'])
+for schema in schemas:
+    if schema.get('name') == 'intent-driven':
+        if schema.get('source') != 'project':
+            raise SystemExit(f"intent-driven source is {schema.get('source')!r}, expected project")
+        required = ['proposal', 'specs', 'grill', 'design', 'design-review', 'adr', 'test-plan', 'tasks']
+        artifacts = schema.get('artifacts') or []
+        if artifacts != required:
+            raise SystemExit(f"intent-driven artifacts {artifacts!r}, expected {required!r}")
+        break
+else:
+    raise SystemExit('intent-driven schema not found')
+PY
+pass "local schema" "intent-driven is project-local with proposal/specs/grill/design/design-review/adr/test-plan/tasks"
+
+run_layer "local schema" openspec schema validate intent-driven
+run_layer "OpenSpec CLI" openspec list --json
+
+if [[ "$RUN_SMOKE" == "0" ]]; then
+  echo "! [project artifact] smoke skipped by --no-smoke"
+  echo "✓ Overlay check complete"
+  exit 0
+fi
+
+SMOKE_CHANGE="zz-smoke-intent-overlay-$(date +%Y%m%d%H%M%S)-$$"
+SMOKE_DIR="$ROOT/openspec/changes/$SMOKE_CHANGE"
+[[ ! -e "$SMOKE_DIR" ]] || fail "project artifact" "smoke target already exists: $SMOKE_DIR"
+
+run_layer "project artifact" openspec new change "$SMOKE_CHANGE" --schema intent-driven
+CREATED_SMOKE=1
+
+STATUS_JSON="$(openspec status --change "$SMOKE_CHANGE" --json 2>/tmp/check-overlay-status.err)" || {
+  cat /tmp/check-overlay-status.err >&2
+  fail "OpenSpec CLI" "openspec status --change $SMOKE_CHANGE --json failed"
+}
+STATUS_JSON="$STATUS_JSON" python3 - <<'PY' || fail "generated skill" "new smoke change does not expose expected intent-driven artifact graph"
+import json, os
+obj = json.loads(os.environ['STATUS_JSON'])
+if obj.get('schemaName') != 'intent-driven':
+    raise SystemExit(f"schemaName={obj.get('schemaName')!r}")
+expected = ['proposal', 'specs', 'grill', 'design', 'design-review', 'adr', 'test-plan', 'tasks']
+actual = [a.get('id') for a in obj.get('artifacts', [])]
+if actual != expected:
+    raise SystemExit(f"artifacts={actual!r}, expected={expected!r}")
+if obj.get('applyRequires') != ['tasks']:
+    raise SystemExit(f"applyRequires={obj.get('applyRequires')!r}")
+if obj['artifacts'][0].get('status') != 'ready':
+    raise SystemExit('proposal artifact is not ready')
+PY
+pass "generated skill" "new smoke change exposes expected artifact graph"
+
+mkdir -p "$SMOKE_DIR/specs/smoke-capability"
+cat > "$SMOKE_DIR/proposal.md" <<'SMOKE'
+## Why
+Smoke check for intent-driven overlay compatibility.
+
+## What Changes
+- Add temporary smoke-only artifacts.
+
+## Capabilities
+- smoke-capability
+
+## Impact
+- None. The checker deletes this temporary change by default.
+SMOKE
+
+cat > "$SMOKE_DIR/specs/smoke-capability/spec.md" <<'SMOKE'
+## ADDED Requirements
+
+### Requirement: Smoke compatibility
+The overlay MUST expose proposal, specs, grill, design, design-review, adr, test-plan, and tasks context to apply.
+
+#### Scenario: Apply context is available
+- **GIVEN** a completed smoke change
+- **WHEN** apply instructions are requested
+- **THEN** the response includes every expanded intent-driven artifact context file
+SMOKE
+
+cat > "$SMOKE_DIR/grill.md" <<'SMOKE'
+## Context Read
+
+- Temporary smoke proposal and specs.
+
+## Plan Summary
+
+- Verify hardened lifecycle compatibility before design.
+
+## Question Loop
+
+- None; no material questions remain.
+
+## Resolved Terms
+
+- None.
+
+## Document Updates Applied
+
+- None.
+
+## Document Updates Required Before Next Gate
+
+- None.
+
+## ADR Candidates
+
+- None.
+
+## Open Questions
+
+None.
+SMOKE
+
+cat > "$SMOKE_DIR/design.md" <<'SMOKE'
+## Context
+Smoke-only design.
+
+## Goals / Non-Goals
+**Goals:** Verify overlay shape.
+
+**Non-Goals:** No runtime changes.
+
+## Decisions
+- Use temporary OpenSpec artifacts only.
+
+## Risks / Trade-offs
+- None.
+
+## Migration Plan
+- None.
+
+## Open Questions
+- None.
+SMOKE
+
+cat > "$SMOKE_DIR/design-review.md" <<'SMOKE'
+## Context Read
+
+- Temporary smoke artifacts and smoke design.
+
+## Design Summary
+
+- Verify expanded lifecycle compatibility after design.
+
+## Question Loop
+
+- None; no material questions remain.
+
+## Design Findings
+
+- None.
+
+## Document Updates Applied
+
+- None.
+
+## Document Updates Required Before Next Gate
+
+- None.
+
+## ADR Candidates
+
+- None.
+
+## Open Questions
+
+None.
+SMOKE
+
+cat > "$SMOKE_DIR/adr.md" <<'SMOKE'
+## ADR Review
+
+## Existing In-Force ADRs
+- None
+
+## Constitution / Architecture Rules Considered
+- None
+
+## Decisions Evaluated
+- Smoke check does not create durable architecture decisions.
+
+## New Durable ADRs Created
+- None
+
+## Superseded ADRs
+- None
+
+## Architecture Snapshot Updates
+- None
+
+## No ADR Needed
+- Smoke-only temporary change; no durable architectural decision is made.
+SMOKE
+
+cat > "$SMOKE_DIR/test-plan.md" <<'SMOKE'
+## TDD Strategy
+
+Smoke check uses command-based public-interface verification.
+
+## Vertical TDD Slices
+
+| Slice | Public interface / behavior | RED command and expected failure | GREEN command and expected pass | Refactor criteria |
+| --- | --- | --- | --- | --- |
+| Smoke apply context | OpenSpec apply instructions include hardened context files | Before writing smoke artifacts, apply instructions are blocked or missing context | `openspec instructions apply --change <smoke> --json` returns all hardened context files | Keep checker readable |
+
+## Mocking / Boundary Policy
+
+- No mocks; use OpenSpec CLI as the public interface.
+
+## Required Checks
+
+- openspec instructions apply --change <smoke> --json
+
+## Evidence Log
+
+- Filled by this checker run.
+
+## TDD Exceptions
+
+None.
+SMOKE
+
+cat > "$SMOKE_DIR/tasks.md" <<'SMOKE'
+## 1. Smoke
+
+- [x] 1.1 Create temporary artifacts for overlay compatibility check.
+SMOKE
+
+STATUS_JSON="$(openspec status --change "$SMOKE_CHANGE" --json 2>/tmp/check-overlay-status-complete.err)" || {
+  cat /tmp/check-overlay-status-complete.err >&2
+  fail "project artifact" "completed smoke status failed"
+}
+STATUS_JSON="$STATUS_JSON" python3 - <<'PY' || fail "project artifact" "completed smoke change is not apply-ready"
+import json, os
+obj = json.loads(os.environ['STATUS_JSON'])
+if not obj.get('isComplete'):
+    raise SystemExit('isComplete is false')
+not_done = [a for a in obj.get('artifacts', []) if a.get('status') != 'done']
+if not_done:
+    raise SystemExit(f"artifacts not done: {not_done!r}")
+PY
+pass "project artifact" "smoke change is apply-ready"
+
+CLAUDE_REVIEW_TMP_CONFIG="$(mktemp)"
+python3 - <<'PY' "$ROOT/.codex/openspec-claude-review.json" "$CLAUDE_REVIEW_TMP_CONFIG"
+import json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+config['enabled'] = True
+config.setdefault('defaults', {})['persistReport'] = False
+pathlib.Path(sys.argv[2]).write_text(json.dumps(config, indent=2))
+PY
+CLAUDE_REVIEW_JSON="$(scripts/openspec-claude-review --change "$SMOKE_CHANGE" --stage specs --dry-run --config "$CLAUDE_REVIEW_TMP_CONFIG" 2>/tmp/check-overlay-claude-dry-run.err)" || {
+  cat /tmp/check-overlay-claude-dry-run.err >&2
+  rm -f "$CLAUDE_REVIEW_TMP_CONFIG"
+  fail "Claude review" "dry-run review failed"
+}
+CLAUDE_REVIEW_JSON="$CLAUDE_REVIEW_JSON" python3 - <<'PY' || fail "Claude review" "dry-run output is invalid"
+import json, os
+obj = json.loads(os.environ['CLAUDE_REVIEW_JSON'])
+if obj.get('verdict') != 'pass' or not obj.get('dryRun'):
+    raise SystemExit(f"unexpected review result: {obj!r}")
+if not obj.get('reviewedFiles'):
+    raise SystemExit('no reviewedFiles in dry-run output')
+if 'budgetLimitUsd' not in obj:
+    raise SystemExit('budgetLimitUsd missing from dry-run output')
+PY
+pass "Claude review" "dry-run review works without contacting Claude"
+
+CLAUDE_REVIEW_PARSE_SAMPLE="$(mktemp)"
+cat > "$CLAUDE_REVIEW_PARSE_SAMPLE" <<'JSON'
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "total_cost_usd": 0.012345,
+  "duration_ms": 2222,
+  "num_turns": 1,
+  "result": "",
+  "structured_output": {
+    "verdict": "pass",
+    "summary": "structured output parsed",
+    "mustFix": [],
+    "shouldFix": [],
+    "questions": []
+  }
+}
+JSON
+CLAUDE_REVIEW_PARSE_JSON="$(scripts/openspec-claude-review --change "$SMOKE_CHANGE" --stage specs --config "$CLAUDE_REVIEW_TMP_CONFIG" --parse-file "$CLAUDE_REVIEW_PARSE_SAMPLE" 2>/tmp/check-overlay-claude-parse.err)" || {
+  cat /tmp/check-overlay-claude-parse.err >&2
+  rm -f "$CLAUDE_REVIEW_TMP_CONFIG" "$CLAUDE_REVIEW_PARSE_SAMPLE"
+  fail "Claude review" "structured_output parse-file review failed"
+}
+CLAUDE_REVIEW_PARSE_JSON="$CLAUDE_REVIEW_PARSE_JSON" python3 - <<'PY' || fail "Claude review" "structured_output parse-file result is invalid"
+import json, os
+obj = json.loads(os.environ['CLAUDE_REVIEW_PARSE_JSON'])
+if obj.get('verdict') != 'pass':
+    raise SystemExit(f"unexpected parsed review result: {obj!r}")
+if obj.get('summary') != 'structured output parsed':
+    raise SystemExit(f"unexpected parsed summary: {obj.get('summary')!r}")
+cost = obj.get('cost') or {}
+if cost.get('total_cost_usd') != 0.012345 or cost.get('duration_ms') != 2222 or cost.get('num_turns') != 1:
+    raise SystemExit(f"cost metadata was not preserved: {cost!r}")
+if 'budgetLimitUsd' not in obj:
+    raise SystemExit('budgetLimitUsd missing from parsed review output')
+PY
+pass "Claude review" "structured_output envelopes parse with cost metadata without contacting Claude"
+
+CLAUDE_REVIEW_BUDGET_SAMPLE="$(mktemp)"
+CLAUDE_REVIEW_BUDGET_SESSION="$(mktemp -d)"
+cat > "$CLAUDE_REVIEW_BUDGET_SAMPLE" <<'JSON'
+{
+  "type": "result",
+  "subtype": "error_max_budget_usd",
+  "is_error": true,
+  "total_cost_usd": 0.0264135,
+  "duration_ms": 4018,
+  "num_turns": 1,
+  "errors": ["Reached maximum budget ($0.000001)"]
+}
+JSON
+set +e
+CLAUDE_REVIEW_BUDGET_JSON="$(CODEX_OPENSPEC_SESSION_FILE="$CLAUDE_REVIEW_BUDGET_SESSION/session.json" scripts/openspec-claude-review --change "$SMOKE_CHANGE" --stage specs --config "$CLAUDE_REVIEW_TMP_CONFIG" --parse-file "$CLAUDE_REVIEW_BUDGET_SAMPLE" 2>/tmp/check-overlay-claude-budget.err)"
+CLAUDE_REVIEW_BUDGET_CODE=$?
+set -e
+if [[ "$CLAUDE_REVIEW_BUDGET_CODE" != "2" ]]; then
+  cat /tmp/check-overlay-claude-budget.err >&2
+  rm -f "$CLAUDE_REVIEW_TMP_CONFIG" "$CLAUDE_REVIEW_PARSE_SAMPLE" "$CLAUDE_REVIEW_BUDGET_SAMPLE"
+  rm -rf "$CLAUDE_REVIEW_BUDGET_SESSION"
+  fail "Claude review" "budget-exhausted fixture exited $CLAUDE_REVIEW_BUDGET_CODE, expected 2"
+fi
+CLAUDE_REVIEW_BUDGET_JSON="$CLAUDE_REVIEW_BUDGET_JSON" python3 - "$CLAUDE_REVIEW_BUDGET_SESSION/session.json" <<'PY' || fail "Claude review" "budget-exhausted result did not disable session review"
+import json, os, pathlib, sys
+obj = json.loads(os.environ['CLAUDE_REVIEW_BUDGET_JSON'])
+if obj.get('verdict') != 'blocked' or not obj.get('budgetExhausted'):
+    raise SystemExit(f"unexpected budget result: {obj!r}")
+if not obj.get('autoDisabledSessionReview', {}).get('disabled'):
+    raise SystemExit(f"session auto-disable was not reported: {obj!r}")
+state = json.loads(pathlib.Path(sys.argv[1]).read_text())
+review = state.get('claudeReview') or {}
+if review.get('decision') != 'disabled' or review.get('enabled') is not False:
+    raise SystemExit(f"session review was not disabled: {state!r}")
+PY
+rm -rf "$CLAUDE_REVIEW_BUDGET_SESSION"
+rm -f "$CLAUDE_REVIEW_BUDGET_SAMPLE"
+pass "Claude review" "budget-exhausted envelopes block and disable session review without contacting Claude"
+
+mkdir -p "$SMOKE_DIR/reviews"
+cat > "$SMOKE_DIR/reviews/specs-claude-review.json" <<JSON
+{"schemaVersion":1,"change":"$SMOKE_CHANGE","stage":"specs","verdict":"pass","cost":{"total_cost_usd":0.01}}
+JSON
+cat > "$SMOKE_DIR/reviews/design-claude-review.json" <<JSON
+{"schemaVersion":1,"change":"$SMOKE_CHANGE","stage":"design","verdict":"warn","cost":{"total_cost_usd":"0.025"}}
+JSON
+cat > "$SMOKE_DIR/reviews/tasks-claude-review.json" <<JSON
+{"schemaVersion":1,"change":"$SMOKE_CHANGE","stage":"tasks","verdict":"pass"}
+JSON
+CLAUDE_REVIEW_COST_SUMMARY_JSON="$(scripts/openspec-claude-review --cost-summary --change "$SMOKE_CHANGE" 2>/tmp/check-overlay-claude-cost-summary.err)" || {
+  cat /tmp/check-overlay-claude-cost-summary.err >&2
+  rm -f "$CLAUDE_REVIEW_TMP_CONFIG" "$CLAUDE_REVIEW_PARSE_SAMPLE"
+  fail "Claude review" "cost-summary helper failed"
+}
+CLAUDE_REVIEW_COST_SUMMARY_JSON="$CLAUDE_REVIEW_COST_SUMMARY_JSON" python3 - <<'PY' || fail "Claude review" "cost-summary result is invalid"
+import json, os
+obj = json.loads(os.environ['CLAUDE_REVIEW_COST_SUMMARY_JSON'])
+if obj.get('reviewCount') != 3 or obj.get('costedReviewCount') != 2 or obj.get('missingCostCount') != 1:
+    raise SystemExit(f"unexpected counts: {obj!r}")
+if abs(obj.get('totalCostUsd', -1) - 0.035) > 1e-12:
+    raise SystemExit(f"unexpected totalCostUsd: {obj!r}")
+PY
+pass "Claude review" "cost-summary aggregates persisted report costs without contacting Claude"
+
+rm -f "$CLAUDE_REVIEW_TMP_CONFIG" "$CLAUDE_REVIEW_PARSE_SAMPLE"
+
+APPLY_JSON="$(openspec instructions apply --change "$SMOKE_CHANGE" --json 2>/tmp/check-overlay-apply.err)" || {
+  cat /tmp/check-overlay-apply.err >&2
+  fail "generated skill" "apply instructions failed"
+}
+APPLY_JSON="$APPLY_JSON" python3 - <<'PY' || fail "generated skill" "apply context is missing required intent-driven files"
+import json, os
+obj = json.loads(os.environ['APPLY_JSON'])
+expected = ['proposal', 'specs', 'grill', 'design', 'design-review', 'adr', 'test-plan', 'tasks']
+ctx = obj.get('contextFiles') or {}
+missing = [key for key in expected if not ctx.get(key)]
+if missing:
+    raise SystemExit(f"missing context keys: {missing!r}")
+if obj.get('progress', {}).get('total') != 1:
+    raise SystemExit(f"unexpected progress={obj.get('progress')!r}")
+PY
+pass "generated skill" "apply context includes proposal/specs/grill/design/design-review/adr/test-plan/tasks"
+
+echo "✓ Overlay check complete"

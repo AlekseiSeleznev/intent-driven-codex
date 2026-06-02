@@ -1,0 +1,255 @@
+name: intent-driven
+version: 1
+description: Intent-driven OpenSpec workflow for Codex - proposal -> specs -> grill -> design -> design-review -> adr -> test-plan -> tasks
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Initial proposal document outlining the change intent
+    template: proposal.md
+    instruction: >
+      Create the proposal document that establishes WHY this change is needed.
+
+      Sections:
+      - **Why**: 1-2 sentences on the problem or opportunity.
+      - **What Changes**: Bullet list of concrete changes. Mark breaking changes
+        with **BREAKING**.
+      - **Capabilities**: Identify behavior specs to create or modify.
+        New capabilities become `specs/<capability>/spec.md` files.
+        Modified capabilities must use existing names from `openspec/specs/`.
+      - **Impact**: Affected code, APIs, dependencies, docs, or systems.
+
+      Research existing specs before filling the Capabilities section. Account
+      for root `CONSTITUTION.md`, root `CONTEXT.md` or `CONTEXT-MAP.md` when
+      present, root `ARCHITECTURE.md`, and in-force ADR decisions when relevant.
+      Treat these as Codex-layer project context, not OpenSpec change artifacts,
+      and never copy secret values into artifacts.
+
+      Keep the proposal focused on intent and scope; implementation details
+      belong in design.md.
+    requires: []
+
+  - id: specs
+    generates: specs/**/*.md
+    description: OpenSpec Markdown specs with normative requirements and Gherkin-style scenarios
+    template: spec.md
+    instruction: >
+      Create one OpenSpec Markdown delta spec per capability listed in the
+      proposal. Use `specs/<capability>/spec.md`.
+
+      Use OpenSpec delta headers exactly:
+      - `## ADDED Requirements`
+      - `## MODIFIED Requirements`
+      - `## REMOVED Requirements`
+      - `## RENAMED Requirements`
+
+      Each requirement MUST use `### Requirement: <name>` and MUST include
+      normative requirement prose with `MUST` or `SHALL` before scenarios.
+      Every requirement MUST have at least one `#### Scenario: <name>` block.
+      Scenarios should be Gherkin-style observable behavior with `GIVEN`,
+      `WHEN`, `THEN`, and optional `AND`/`BUT` steps.
+
+      For MODIFIED requirements, copy the entire existing requirement block
+      from `openspec/specs/<capability>/spec.md` and edit it to represent the
+      full desired behavior after the change. Do not use partial diffs.
+
+      Account for relevant root `CONSTITUTION.md`, glossary context from
+      `CONTEXT.md`/`CONTEXT-MAP.md`, root `ARCHITECTURE.md`, and in-force ADRs.
+      Avoid requirements that contradict project-wide technology, architecture,
+      external-system, documentation, verification, or AI operating constraints.
+    requires:
+      - proposal
+
+  - id: grill
+    generates: grill.md
+    description: Mandatory pre-design Matt grill-with-docs gate
+    template: grill.md
+    instruction: >
+      Create `openspec/changes/<change>/grill.md` as the mandatory pre-design
+      Matt `grill-with-docs` gate.
+
+      Use the project-local `grill-with-docs` skill, including its context and
+      ADR guidance. Before asking questions, read proposal.md, all delta specs,
+      root `CONSTITUTION.md`, root `CONTEXT.md` or `CONTEXT-MAP.md` when present,
+      root `ARCHITECTURE.md`, top-level `adr/*.md`, project docs, and relevant
+      code when those files can answer material questions.
+
+      Ask one focused question at a time only when material uncertainty cannot
+      be resolved by inspecting the repository. Include your recommended answer
+      and rationale. Continue until no material uncertainty remains or the user
+      explicitly stops/overrides the gate.
+
+      Update resolved glossary terms in `CONTEXT.md` inline when appropriate.
+      Update proposal/specs or require exact updates when grill findings change
+      scope, behavior, terminology, boundaries, or acceptance criteria. Record
+      ADR candidates only when the decision is hard to reverse, surprising
+      without context, and a genuine trade-off.
+
+      Do not allow design.md to proceed unless `Open Questions` is `None` or an
+      explicit one-time override is recorded.
+    requires:
+      - proposal
+      - specs
+
+  - id: design
+    generates: design.md
+    description: Technical design document with implementation approach, trade-offs, and boundaries
+    template: design.md
+    instruction: >
+      Create the design document that explains HOW to implement the behavior
+      defined in specs and resolved by grill.md.
+
+      Before writing, read proposal.md, all delta specs, grill.md, relevant root
+      `CONSTITUTION.md` rules, glossary context from `CONTEXT.md`/`CONTEXT-MAP.md`,
+      root `ARCHITECTURE.md`, and top-level `adr/*.md`. Build the in-force ADR
+      set by following supersession links. If an in-force ADR should be
+      revisited, do not edit it; record the need under Open Questions so the ADR
+      step can create a superseding ADR. If constitution, glossary, or
+      architecture rules conflict with the planned approach, pause for user
+      direction rather than designing around the conflict silently.
+
+      Include context, goals/non-goals, technical decisions with alternatives,
+      risks/trade-offs, migration/rollback notes, and open questions. Use
+      Mermaid or ASCII diagrams when boundaries, integrations, runtime units, or
+      deployment shape are non-trivial; otherwise state why no diagram is needed.
+    requires:
+      - proposal
+      - specs
+      - grill
+
+  - id: design-review
+    generates: design-review.md
+    description: Mandatory post-design Matt grill-with-docs review before ADR planning
+    template: design-review.md
+    instruction: >
+      Create `openspec/changes/<change>/design-review.md` as the mandatory
+      post-design Matt `grill-with-docs` gate before ADR and test planning.
+
+      Use the project-local `grill-with-docs` skill. Read proposal.md, all delta
+      specs, grill.md, design.md, relevant root `CONSTITUTION.md`, glossary
+      context from `CONTEXT.md`/`CONTEXT-MAP.md`, root `ARCHITECTURE.md`,
+      top-level `adr/*.md`, project docs, and relevant code.
+
+      Stress-test the design against behavior specs, glossary language,
+      architecture boundaries, in-force ADRs, implementation constraints,
+      external-system/secret rules, and verification feasibility. Ask one
+      question at a time only when repository context cannot resolve a material
+      uncertainty; include your recommended answer and rationale.
+
+      If findings change proposal/specs/grill/design, update them or require
+      exact updates before ADR planning proceeds. Record durable ADR candidates
+      sparingly using the Matt criteria. Do not allow ADR/test-plan/tasks to
+      proceed unless `Open Questions` is `None` or an explicit one-time override
+      is recorded.
+    requires:
+      - design
+
+  - id: adr
+    generates: adr.md
+    description: Per-change ADR review with optional durable ADR references
+    template: adr.md
+    instruction: >
+      Create `openspec/changes/<change>/adr.md` as the ADR review gate for this
+      change. This artifact is required for every change, even when no durable
+      ADR is needed.
+
+      Read grill.md, design-review.md, design.md, relevant root `CONSTITUTION.md`,
+      glossary context from `CONTEXT.md`/`CONTEXT-MAP.md`, root `ARCHITECTURE.md`,
+      and top-level `adr/*.md`. Determine currently in-force ADRs by following
+      supersession links. List evaluated decisions, grill findings considered,
+      existing in-force ADRs and constitution/architecture constraints
+      considered, durable ADRs created, superseded ADRs, architecture snapshot
+      updates, and no-ADR rationale.
+
+      If a durable architectural decision is needed, create a new append-only
+      file in top-level `adr/NNNN-kebab-title.md`. Do not rewrite accepted ADRs.
+      If a decision replaces a prior one, create a new ADR that supersedes the
+      old ADR and reference that relationship from this review. If current
+      architecture changes, include an implementation task to update
+      `ARCHITECTURE.md`.
+    requires:
+      - design-review
+
+  - id: test-plan
+    generates: test-plan.md
+    description: Mandatory Matt TDD plan before implementation tasks
+    template: test-plan.md
+    instruction: >
+      Create `openspec/changes/<change>/test-plan.md` before implementation
+      tasks are written.
+
+      Read proposal.md, all delta specs, grill.md, design.md, design-review.md,
+      adr.md, relevant root `CONSTITUTION.md` verification rules, glossary
+      context from `CONTEXT.md`/`CONTEXT-MAP.md`, root `ARCHITECTURE.md`, and
+      in-force ADR constraints. Use the project-local `tdd` skill as the
+      canonical discipline for behavior-changing work.
+
+      Define vertical RED -> GREEN -> REFACTOR slices. Each slice should name
+      the public interface or observable behavior, the first failing test/check,
+      the RED command and expected failure, the minimal GREEN path, the GREEN
+      command/evidence, refactor criteria, and mock/boundary policy. Do not plan
+      horizontal "all tests first, all implementation later" work.
+
+      If classic automated TDD is not feasible, document the blocker and the
+      strongest substitute evidence as an explicit exception before tasks are
+      written. The later tasks artifact must order test-first work before or
+      alongside production changes and may not mark behavior-changing work done
+      without RED/GREEN evidence or an approved exception.
+    requires:
+      - adr
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist with dependency-ordered checkbox tasks
+    template: tasks.md
+    instruction: >
+      Create the task list that breaks down the implementation work.
+
+      Each task MUST be a checkbox in the form `- [ ] X.Y Task description` so
+      the apply phase can track progress. Group related tasks under numbered
+      headings. Order tasks by dependency and make each task verifiable.
+
+      Reference proposal for intent, specs for behavior, grill.md for resolved
+      domain/context uncertainty, design.md for approach, design-review.md for
+      post-design review resolutions, per-change adr.md for ADR review,
+      test-plan.md for Matt TDD slice ordering, top-level `adr/*.md` for durable
+      architectural commitments, root `ARCHITECTURE.md` for the current
+      architecture snapshot, `CONTEXT.md`/`CONTEXT-MAP.md` for terminology, and
+      root `CONSTITUTION.md` rules for project-wide constraints. Include
+      implementation or verification tasks needed to preserve constitution,
+      architecture, glossary, grill, ADR, and TDD rules, while keeping real
+      secret values out of tracked files.
+    requires:
+      - specs
+      - grill
+      - design
+      - design-review
+      - adr
+      - test-plan
+
+apply:
+  requires:
+    - tasks
+  tracks: tasks.md
+  instruction: |
+    Run the project context preflight before implementation work, goal handoff,
+    external-system access, or verification-sensitive actions. Read all context
+    files from OpenSpec, including grill.md, design-review.md, and test-plan.md,
+    then read relevant root CONSTITUTION.md rules, root CONTEXT.md or
+    CONTEXT-MAP.md glossary context when present, root ARCHITECTURE.md context,
+    and top-level adr/*.md when present. Treat constitution, context, and
+    architecture files as Codex-layer project context, not OpenSpec artifacts.
+    Read .secrets.local.env only when the current workflow actually needs a
+    listed external system, and never reveal secret values.
+
+    For behavior-changing implementation, use the project-local tdd skill as the
+    canonical discipline. Work one vertical RED -> GREEN -> REFACTOR slice at a
+    time: write or identify one public-interface behavior check, run it and
+    confirm the expected failure, implement the minimum code to pass, run the
+    green check, then refactor only while green. Do not write production code
+    before RED evidence unless test-plan.md contains an explicit approved
+    exception. Mark tasks complete only after the relevant verification evidence
+    exists.
+
+    Pause on blockers, unclear requirements, unresolved grill findings,
+    constitution/architecture/context conflicts, missing required credentials,
+    missing RED/GREEN evidence, verification limitations, or artifact mismatches.

@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+fail() { echo "✗ $*" >&2; exit 1; }
+pass() { echo "✓ $*"; }
+
+run_source_layout() {
+  [[ -x "$ROOT/bin/opsx" ]] || fail "bin/opsx missing or not executable"
+  [[ -x "$ROOT/bin/openspec-shim" ]] || fail "bin/openspec-shim missing or not executable"
+  [[ -f "$ROOT/manifest.yaml" ]] || fail "manifest.yaml missing"
+  (cd "$ROOT" && python3 bin/opsx doctor --root . --source-root .) >/tmp/test-auto-repair-source-layout.out
+  grep -q "overlay healthy" /tmp/test-auto-repair-source-layout.out || fail "source doctor did not report healthy"
+  pass "source layout is healthy"
+}
+
+make_fake_real_openspec() {
+  local path="$1"
+  cat > "$path" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "$1" == "--version" ]]; then echo "1.4.0"; exit 0; fi
+if [[ "${1:-}" == "init" || "${1:-}" == "update" ]]; then exit 0; fi
+echo "fake openspec $*"
+FAKE
+  chmod +x "$path"
+}
+
+make_minimal_source_root() {
+  local root="$1"
+  mkdir -p "$root/bin" "$root/docs" "$root/.codex/prompts"
+  cp "$ROOT/bin/opsx" "$root/bin/opsx"
+  cp "$ROOT/bin/openspec-shim" "$root/bin/openspec-shim"
+  cp "$ROOT/manifest.yaml" "$root/manifest.yaml"
+  cp "$ROOT/docs/lifecycle.md" "$root/docs/lifecycle.md"
+  cp "$ROOT/docs/update-safety.md" "$root/docs/update-safety.md"
+  chmod +x "$root/bin/opsx" "$root/bin/openspec-shim"
+}
+
+run_same_root_install() {
+  local tmp source bin real state
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  source="$tmp/source"
+  bin="$tmp/bin"
+  real="$tmp/real-openspec"
+  state="$tmp/state.json"
+  make_minimal_source_root "$source"
+  make_fake_real_openspec "$real"
+  printf 'sentinel\n' > "$source/sentinel.txt"
+  OPSX_REAL_OPENSPEC="$real" OPSX_STATE_FILE="$state" python3 "$ROOT/bin/opsx" install-auto-repair --source-root "$source" --share-root "$source" --bin-dir "$bin" >/tmp/test-auto-repair-same-root.out
+  [[ -f "$source/sentinel.txt" ]] || fail "same-root install removed source sentinel"
+  [[ -x "$bin/opsx" ]] || fail "same-root install did not install opsx"
+  [[ -x "$bin/openspec" ]] || fail "same-root install did not install openspec shim"
+  grep -q "shared source root $source" /tmp/test-auto-repair-same-root.out || fail "same-root install did not report preserved share root"
+  pass "same-root install preserves source root"
+}
+
+run_shim_noop() {
+  local tmp bin real repair_log
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  bin="$tmp/bin"
+  real="$tmp/real-openspec"
+  repair_log="$tmp/repair.log"
+  mkdir -p "$bin"
+  cp "$ROOT/bin/openspec-shim" "$bin/openspec-shim"
+  cat > "$bin/opsx" <<'FAKEOPSX'
+#!/usr/bin/env bash
+echo "$*" >> "$OPSX_TEST_REPAIR_LOG"
+exit 0
+FAKEOPSX
+  chmod +x "$bin/openspec-shim" "$bin/opsx"
+  make_fake_real_openspec "$real"
+  OPSX_REAL_OPENSPEC="$real" OPSX_TEST_REPAIR_LOG="$repair_log" "$bin/openspec-shim" update --help >/tmp/test-auto-repair-shim-help.out
+  [[ ! -f "$repair_log" ]] || fail "shim repaired for update --help"
+  OPSX_REAL_OPENSPEC="$real" OPSX_TEST_REPAIR_LOG="$repair_log" "$bin/openspec-shim" --version >/tmp/test-auto-repair-shim-version.out
+  [[ ! -f "$repair_log" ]] || fail "shim repaired for --version"
+  OPSX_REAL_OPENSPEC="$real" OPSX_TEST_REPAIR_LOG="$repair_log" "$bin/openspec-shim" update >/tmp/test-auto-repair-shim-update.out
+  [[ -f "$repair_log" ]] || fail "shim did not repair for mutating update"
+  grep -q 'repair --yes --summary' "$repair_log" || fail "shim repair command shape changed unexpectedly"
+  pass "shim skips no-op repair and keeps mutating repair"
+}
+
+make_docs_manifest_source() {
+  local source="$1"
+  mkdir -p "$source/docs"
+  cat > "$source/manifest.yaml" <<'MANIFEST'
+version: 1
+template: intent-driven-codex
+repairSources:
+  root: .
+  exclude: []
+templateOwnedPaths:
+  - docs/intent-driven-lifecycle.md
+  - docs/intent-driven-update-safety.md
+createOnlyPaths: []
+requiredPrompts: []
+requiredMarkers: []
+MANIFEST
+  printf 'lifecycle\n' > "$source/docs/lifecycle.md"
+  printf 'update safety\n' > "$source/docs/update-safety.md"
+}
+
+run_doctor_doc_layouts() {
+  local tmp source installed
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  source="$tmp/source"
+  installed="$tmp/installed"
+  make_docs_manifest_source "$source"
+  python3 "$ROOT/bin/opsx" doctor --root "$source" --source-root "$source" >/tmp/test-auto-repair-doc-source.out
+  grep -q "overlay healthy" /tmp/test-auto-repair-doc-source.out || fail "source canonical docs were not healthy"
+  mkdir -p "$installed/docs"
+  cp "$source/docs/lifecycle.md" "$installed/docs/intent-driven-lifecycle.md"
+  cp "$source/docs/update-safety.md" "$installed/docs/intent-driven-update-safety.md"
+  python3 "$ROOT/bin/opsx" doctor --root "$installed" --source-root "$source" >/tmp/test-auto-repair-doc-installed.out
+  grep -q "overlay healthy" /tmp/test-auto-repair-doc-installed.out || fail "installed alias docs were not healthy"
+  printf 'drift\n' > "$installed/docs/intent-driven-lifecycle.md"
+  if python3 "$ROOT/bin/opsx" doctor --root "$installed" --source-root "$source" >/tmp/test-auto-repair-doc-drift.out 2>&1; then
+    fail "installed alias doc drift was not reported"
+  fi
+  grep -q "docs/intent-driven-lifecycle.md" /tmp/test-auto-repair-doc-drift.out || fail "doc drift output did not name alias path"
+  pass "doctor supports source canonical docs and installed aliases"
+}
+
+make_versioned_openspec() {
+  local path="$1" version="$2"
+  cat > "$path" <<FAKE
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then echo "$version"; exit 0; fi
+exit 0
+FAKE
+  chmod +x "$path"
+}
+
+write_state_file() {
+  local state="$1" real="$2" bin_dir="$3"
+  python3 - <<'PYSTATE' "$state" "$real" "$bin_dir"
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({"real_openspec": sys.argv[2], "bin_dir": sys.argv[3]}, indent=2) + "\n")
+PYSTATE
+}
+
+run_stale_real_openspec() {
+  local tmp bin realbin current stale state
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  bin="$tmp/bin"
+  realbin="$tmp/realbin"
+  mkdir -p "$bin" "$realbin"
+  cp "$ROOT/bin/openspec-shim" "$bin/openspec"
+  chmod +x "$bin/openspec"
+  current="$realbin/openspec"
+  stale="$tmp/stale-openspec"
+  make_versioned_openspec "$current" "1.4.0"
+  make_versioned_openspec "$stale" "1.3.1"
+  state="$tmp/state.json"
+  write_state_file "$state" "$current" "$bin"
+  OPSX_STATE_FILE="$state" PATH="$bin:$realbin:$PATH" python3 "$ROOT/bin/opsx" sanity --bin-dir "$bin" >/tmp/test-auto-repair-sanity-current.out
+  grep -q "real OpenSpec sanity ok" /tmp/test-auto-repair-sanity-current.out || fail "current real OpenSpec sanity did not pass"
+  write_state_file "$state" "$stale" "$bin"
+  if OPSX_STATE_FILE="$state" PATH="$bin:$realbin:$PATH" python3 "$ROOT/bin/opsx" sanity --bin-dir "$bin" >/tmp/test-auto-repair-sanity-stale.out 2>&1; then
+    fail "stale real OpenSpec path was accepted"
+  fi
+  grep -qi "stale" /tmp/test-auto-repair-sanity-stale.out || fail "stale diagnostic missing"
+  write_state_file "$state" "$bin/openspec" "$bin"
+  if OPSX_STATE_FILE="$state" PATH="$bin:$realbin:$PATH" python3 "$ROOT/bin/opsx" sanity --bin-dir "$bin" >/tmp/test-auto-repair-sanity-self.out 2>&1; then
+    fail "self-shim real OpenSpec path was accepted"
+  fi
+  grep -qi "shim" /tmp/test-auto-repair-sanity-self.out || fail "self-shim diagnostic missing"
+  write_state_file "$state" "$tmp/missing-openspec" "$bin"
+  if OPSX_STATE_FILE="$state" PATH="$bin:$realbin:$PATH" python3 "$ROOT/bin/opsx" sanity --bin-dir "$bin" >/tmp/test-auto-repair-sanity-missing.out 2>&1; then
+    fail "missing real OpenSpec path was accepted"
+  fi
+  grep -qi "missing" /tmp/test-auto-repair-sanity-missing.out || fail "missing diagnostic missing"
+  pass "stale real OpenSpec sanity checks work"
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/test-auto-repair-tooling <source-layout|same-root-install|shim-noop|doctor-doc-layouts|stale-real-openspec|all>
+USAGE
+}
+
+case "${1:-all}" in
+  source-layout) run_source_layout ;;
+  same-root-install) run_same_root_install ;;
+  shim-noop) run_shim_noop ;;
+  doctor-doc-layouts) run_doctor_doc_layouts ;;
+  stale-real-openspec) run_stale_real_openspec ;;
+  all) run_source_layout; run_same_root_install; run_shim_noop; run_doctor_doc_layouts; run_stale_real_openspec ;;
+  -h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
