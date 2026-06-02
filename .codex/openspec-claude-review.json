@@ -1,0 +1,29 @@
+{
+  "enabled": false,
+  "configVersion": 1,
+  "defaults": {
+    "model": "claude-sonnet-4-6",
+    "effort": "medium",
+    "fallbackModel": "claude-sonnet-4-6",
+    "maxBudgetUsd": null,
+    "permissionMode": "dontAsk",
+    "tools": "none",
+    "blockOn": ["fail", "blocked"],
+    "unavailablePolicy": "warn",
+    "persistReport": true,
+    "inputMode": "bundle",
+    "strictEffort": true
+  },
+  "stages": {
+    "proposal": { "enabled": false, "model": "claude-sonnet-4-6", "effort": "low", "maxBudgetUsd": null },
+    "specs": { "enabled": true, "model": "claude-sonnet-4-6", "effort": "medium", "maxBudgetUsd": null },
+    "grill": { "enabled": false },
+    "design": { "enabled": true, "model": "claude-sonnet-4-6", "effort": "high", "maxBudgetUsd": null },
+    "design-review": { "enabled": true, "model": "claude-opus-4-8", "effort": "high", "maxBudgetUsd": null },
+    "adr": { "enabled": true, "model": "claude-opus-4-8", "effort": "high", "maxBudgetUsd": null },
+    "test-plan": { "enabled": true, "model": "claude-sonnet-4-6", "effort": "medium", "maxBudgetUsd": null },
+    "tasks": { "enabled": true, "model": "claude-sonnet-4-6", "effort": "medium", "maxBudgetUsd": null },
+    "verify": { "enabled": true, "model": "claude-opus-4-8", "effort": "high", "maxBudgetUsd": null }
+  },
+  "modelCapabilities": {}
+}

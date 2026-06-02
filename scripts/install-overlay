@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/install-overlay <target-project> [--dry-run] [--force-overlay] [--force-config]
+
+Safely installs the intent-driven Codex/OpenSpec overlay into a target project.
+It copies overlay-owned files safely. By default different existing files are
+reported and skipped; use --force-overlay for a Greenfield OpenSpec/Codex init
+where generated placeholder prompts/skills should be replaced. Use --force-config
+for openspec/config.yaml.
+USAGE
+}
+
+[[ $# -gt 0 ]] || { usage >&2; exit 2; }
+TARGET=""
+DRY_RUN=0
+FORCE_CONFIG=0
+FORCE_OVERLAY=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --force-overlay) FORCE_OVERLAY=1 ;;
+    --force-config) FORCE_CONFIG=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      if [[ -z "$TARGET" ]]; then TARGET="$1"; else echo "Unexpected argument: $1" >&2; exit 2; fi
+      ;;
+  esac
+  shift
+done
+[[ -n "$TARGET" ]] || { usage >&2; exit 2; }
+
+SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET="$(mkdir -p "$TARGET" && cd "$TARGET" && pwd)"
+
+warn_parent_git_root() {
+  local target="$1"
+  local git_root
+  git_root="$(git -C "$target" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$git_root" ]] || return 0
+  git_root="$(cd "$git_root" && pwd)"
+  if [[ "$git_root" != "$target" && ! -e "$target/.git" ]]; then
+    echo "WARNING: target '$target' is inside parent Git worktree '$git_root' but is not itself a Git root; Git status, ignore, and tracked-secret checks may refer to the parent worktree." >&2
+  fi
+}
+
+warn_parent_git_root "$TARGET"
+
+copy_file_no_overwrite() {
+  local src="$1"
+  local rel="$2"
+  local force="${3:-0}"
+  local dst="$TARGET/$rel"
+  if [[ -e "$dst" ]]; then
+    if cmp -s "$src" "$dst"; then
+      echo "SKIP identical $rel"
+      return 0
+    fi
+    if [[ "$force" == "1" ]]; then
+      echo "REPLACE $rel"
+      if [[ "$DRY_RUN" == "0" ]]; then
+        mkdir -p "$(dirname "$dst")"
+        cp "$src" "$dst"
+      fi
+      return 0
+    fi
+    echo "SKIP existing $rel"
+    return 0
+  fi
+  echo "COPY $rel"
+  if [[ "$DRY_RUN" == "0" ]]; then
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+  fi
+}
+
+
+ensure_gitignore_line() {
+  local line="$1"
+  local file="$TARGET/.gitignore"
+  if [[ -e "$file" ]] && grep -Fxq "$line" "$file"; then
+    echo "SKIP .gitignore has $line"
+    return 0
+  fi
+  echo "ENSURE .gitignore has $line"
+  if [[ "$DRY_RUN" == "0" ]]; then
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+    printf '\n%s\n' "$line" >> "$file"
+  fi
+}
+
+copy_tree_no_overwrite() {
+  local relroot="$1"
+  local force="${2:-0}"
+  while IFS= read -r -d '' src; do
+    local rel="${src#$SOURCE/}"
+    copy_file_no_overwrite "$src" "$rel" "$force"
+  done < <(find "$SOURCE/$relroot" -type f -print0 | sort -z)
+}
+
+copy_tree_no_overwrite ".codex/prompts" "$FORCE_OVERLAY"
+copy_tree_no_overwrite ".codex/skills" "$FORCE_OVERLAY"
+copy_tree_no_overwrite "openspec/schemas/intent-driven" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/CONSTITUTION.md" "CONSTITUTION.md"
+copy_file_no_overwrite "$SOURCE/ARCHITECTURE.md" "ARCHITECTURE.md"
+copy_file_no_overwrite "$SOURCE/CONTEXT.md" "CONTEXT.md"
+copy_file_no_overwrite "$SOURCE/.secrets.example.env" ".secrets.example.env"
+copy_file_no_overwrite "$SOURCE/openspec/README.md" "openspec/README.md" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/scripts/check-overlay" "scripts/check-overlay" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/scripts/install-overlay" "scripts/install-overlay" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/scripts/test-auto-repair-tooling" "scripts/test-auto-repair-tooling" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/scripts/openspec-claude-review" "scripts/openspec-claude-review" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/scripts/openspec-session-state" "scripts/openspec-session-state" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/scripts/openspec-git-checkpoint" "scripts/openspec-git-checkpoint" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/bin/opsx" "bin/opsx" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/bin/openspec-shim" "bin/openspec-shim" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/manifest.yaml" "manifest.yaml" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/.codex/openspec-claude-review.json" ".codex/openspec-claude-review.json" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/AGENTS.md" "AGENTS.md" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/docs/lifecycle.md" "docs/intent-driven-lifecycle.md" "$FORCE_OVERLAY"
+copy_file_no_overwrite "$SOURCE/docs/update-safety.md" "docs/intent-driven-update-safety.md" "$FORCE_OVERLAY"
+ensure_gitignore_line ".codex/session/"
+
+if [[ ! -e "$TARGET/adr/README.md" ]]; then
+  copy_file_no_overwrite "$SOURCE/adr/README.md" "adr/README.md" "$FORCE_OVERLAY"
+else
+  echo "SKIP existing adr/README.md"
+fi
+
+CONFIG="$TARGET/openspec/config.yaml"
+if [[ -e "$CONFIG" && "$FORCE_CONFIG" == "0" ]]; then
+  echo "SKIP existing openspec/config.yaml"
+  echo "NOTE: review whether to set schema: intent-driven manually."
+else
+  echo "WRITE openspec/config.yaml"
+  if [[ "$DRY_RUN" == "0" ]]; then
+    mkdir -p "$TARGET/openspec"
+    if [[ -e "$CONFIG" ]]; then cp "$CONFIG" "$CONFIG.bak.$(date +%Y%m%d%H%M%S)"; fi
+    cat > "$CONFIG" <<'CONFIGEOF'
+schema: intent-driven
+
+context: |
+  This project uses Codex-native intent-driven development with OpenSpec.
+  Workflow: proposal -> specs -> grill -> design -> design-review -> adr -> test-plan -> tasks.
+  Codex reads CONSTITUTION.md, CONTEXT.md/CONTEXT-MAP.md, and ARCHITECTURE.md as project context; OpenSpec CLI does not.
+
+rules:
+  proposal:
+    - Draft proposal.md from user intent and project context.
+  specs:
+    - Use OpenSpec delta sections and Gherkin-style scenarios in Markdown.
+  grill:
+    - Run Matt grill-with-docs automatically before design; ask one material question at a time only when repository context cannot answer it.
+  design:
+    - Use diagrams for non-trivial boundaries or explain why none is needed; account for grill.md, ARCHITECTURE.md, and in-force ADRs.
+  design-review:
+    - Run Matt grill-with-docs automatically after design and before ADR/test planning.
+  adr:
+    - Durable ADRs live in top-level adr/ and are append-only; update ARCHITECTURE.md when current architecture changes.
+  test-plan:
+    - Use the project-local tdd skill to map requirements and scenarios to vertical RED/GREEN/REFACTOR slices before tasks.
+  tasks:
+    - Create dependency-ordered checkbox tasks based on proposal/specs/grill/design/design-review/ADR/test-plan.
+CONFIGEOF
+  fi
+fi
+
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/scripts/check-overlay" ]]; then
+  chmod +x "$TARGET/scripts/check-overlay"
+fi
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/scripts/install-overlay" ]]; then
+  chmod +x "$TARGET/scripts/install-overlay"
+fi
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/scripts/test-auto-repair-tooling" ]]; then
+  chmod +x "$TARGET/scripts/test-auto-repair-tooling"
+fi
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/scripts/openspec-claude-review" ]]; then
+  chmod +x "$TARGET/scripts/openspec-claude-review"
+fi
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/scripts/openspec-session-state" ]]; then
+  chmod +x "$TARGET/scripts/openspec-session-state"
+fi
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/scripts/openspec-git-checkpoint" ]]; then
+  chmod +x "$TARGET/scripts/openspec-git-checkpoint"
+fi
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/bin/opsx" ]]; then
+  chmod +x "$TARGET/bin/opsx"
+fi
+if [[ "$DRY_RUN" == "0" && -x "$TARGET/bin/openspec-shim" ]]; then
+  chmod +x "$TARGET/bin/openspec-shim"
+fi
+
+echo "Install overlay complete. Next: cd '$TARGET' && openspec schema validate intent-driven && scripts/check-overlay"
