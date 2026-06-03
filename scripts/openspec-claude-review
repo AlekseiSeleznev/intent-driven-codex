@@ -1,0 +1,706 @@
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$@" <<'PY'
+import argparse
+import datetime as _dt
+import decimal
+import fnmatch
+import glob
+import hashlib
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+STAGES = ["proposal", "specs", "grill", "design", "design-review", "adr", "test-plan", "tasks", "verify"]
+EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+REVIEW_VERDICTS = {"pass", "warn", "fail", "blocked", "skipped"}
+DENY_PATTERNS = [
+    ".secrets.local.env",
+    ".secrets.*.local.env",
+    ".env.local",
+    ".env.*.local",
+    ".claude/**",
+    "**/.claude/**",
+    "**/*secret*",
+]
+
+BUILTIN_CAPABILITIES = {
+    "claude-opus-4-8": {"effort": ["low", "medium", "high", "xhigh", "max"], "kind": "pinned"},
+    "claude-opus-4-7": {"effort": ["low", "medium", "high", "xhigh", "max"], "kind": "pinned"},
+    "claude-opus-4-6": {"effort": ["low", "medium", "high", "max"], "kind": "pinned"},
+    "claude-sonnet-4-6": {"effort": ["low", "medium", "high", "max"], "kind": "pinned"},
+    "claude-haiku-4-5": {"effort": [], "kind": "pinned"},
+    "claude-haiku-4-5-20251001": {"effort": [], "kind": "pinned"},
+    "opus": {"effort": ["low", "medium", "high", "xhigh", "max"], "kind": "alias"},
+    "sonnet": {"effort": ["low", "medium", "high", "max"], "kind": "alias"},
+    "haiku": {"effort": [], "kind": "alias"},
+    "best": {"effort": ["low", "medium", "high", "xhigh", "max"], "kind": "alias"},
+}
+
+REVIEW_SCHEMA = {
+    "type": "object",
+    "additionalProperties": True,
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "warn", "fail", "blocked"]},
+        "mustFix": {"type": "array", "items": {"type": "string"}},
+        "shouldFix": {"type": "array", "items": {"type": "string"}},
+        "questions": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"}
+    },
+    "required": ["verdict", "summary"]
+}
+
+
+def eprint(*args: Any) -> None:
+    print(*args, file=sys.stderr)
+
+
+def find_root() -> pathlib.Path:
+    cwd = pathlib.Path.cwd().resolve()
+    if (cwd / "openspec" / "config.yaml").exists() and (cwd / ".codex").exists():
+        return cwd
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], cwd=str(cwd), text=True).strip()
+        return pathlib.Path(out).resolve()
+    except Exception:
+        return cwd
+
+
+def rel(root: pathlib.Path, path: pathlib.Path) -> str:
+    return path.resolve().relative_to(root).as_posix()
+
+
+def is_denied(relpath: str) -> bool:
+    name = pathlib.PurePosixPath(relpath).name
+    for pat in DENY_PATTERNS:
+        if fnmatch.fnmatch(relpath, pat) or fnmatch.fnmatch(name, pat):
+            return True
+    return False
+
+
+def load_json(path: pathlib.Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"config must be a JSON object: {path}")
+    return data
+
+
+def write_json(obj: Dict[str, Any], path: Optional[pathlib.Path] = None) -> None:
+    text = json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True)
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n", encoding="utf-8")
+    print(text)
+
+
+def extract_cost(obj: Any) -> Dict[str, Any]:
+    if not isinstance(obj, dict):
+        return {}
+    cost: Dict[str, Any] = {}
+    for key in ["total_cost_usd", "duration_ms", "num_turns"]:
+        value = obj.get(key)
+        if value is not None:
+            cost[key] = value
+    return cost
+
+
+def decimal_cost(value: Any) -> Optional[decimal.Decimal]:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return decimal.Decimal(str(value))
+    except (decimal.InvalidOperation, ValueError):
+        return None
+
+
+def session_state_path(root: pathlib.Path) -> pathlib.Path:
+    override = os.environ.get("CODEX_OPENSPEC_SESSION_FILE")
+    if override:
+        return pathlib.Path(override).expanduser().resolve()
+    return root / ".codex" / "session" / "openspec-session.json"
+
+
+def disable_session_claude_review(root: pathlib.Path) -> Dict[str, Any]:
+    helper = root / "scripts" / "openspec-session-state"
+    result: Dict[str, Any] = {
+        "attempted": True,
+        "sessionStatePath": rel(root, session_state_path(root)) if session_state_path(root).is_relative_to(root) else str(session_state_path(root)),
+    }
+    if not helper.exists():
+        result.update({"disabled": False, "error": "scripts/openspec-session-state was not found"})
+        return result
+    try:
+        proc = subprocess.run(
+            [str(helper), "--claude-review", "off"],
+            cwd=str(root),
+            env=os.environ.copy(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    except Exception as exc:
+        result.update({"disabled": False, "error": str(exc)})
+        return result
+    result["disabled"] = proc.returncode == 0
+    if proc.returncode != 0:
+        result["error"] = (proc.stderr or proc.stdout or f"exit {proc.returncode}")[:1000]
+    return result
+
+
+def merged_stage(config: Dict[str, Any], stage: str) -> Dict[str, Any]:
+    defaults = dict(config.get("defaults") or {})
+    stages = config.get("stages") or {}
+    stage_cfg = dict(stages.get(stage) or {})
+    merged = defaults
+    merged.update(stage_cfg)
+    merged["stage"] = stage
+    merged["globalEnabled"] = bool(config.get("enabled", False))
+    merged["stageEnabled"] = bool(stage_cfg.get("enabled", True))
+    merged["enabled"] = bool(merged["globalEnabled"] and merged["stageEnabled"])
+    return merged
+
+
+def capabilities(config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    caps = {k: dict(v) for k, v in BUILTIN_CAPABILITIES.items()}
+    for model, value in (config.get("modelCapabilities") or {}).items():
+        if isinstance(value, dict):
+            caps[model] = dict(value)
+    return caps
+
+
+def validate_model_effort(config: Dict[str, Any], stage_cfg: Dict[str, Any], strict: bool = True) -> Tuple[Optional[str], List[str], List[str]]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    model = stage_cfg.get("model")
+    effort = stage_cfg.get("effort")
+    if not isinstance(model, str) or not model.strip():
+        errors.append(f"stage {stage_cfg.get('stage')}: model must be a non-empty string")
+        return None, errors, warnings
+    model = model.strip()
+    caps = capabilities(config)
+    cap = caps.get(model)
+    if cap is None:
+        warnings.append(f"stage {stage_cfg.get('stage')}: model {model!r} is custom/unknown; omit effort unless modelCapabilities defines it")
+        if effort:
+            if strict:
+                errors.append(f"stage {stage_cfg.get('stage')}: effort configured for unknown model {model!r}; add modelCapabilities or remove effort")
+                return None, errors, warnings
+            return None, errors, warnings
+        return None, errors, warnings
+    allowed = cap.get("effort") or []
+    if cap.get("kind") == "alias":
+        warnings.append(f"stage {stage_cfg.get('stage')}: model {model!r} is a floating alias; resolved target may vary by provider/time")
+    if not effort:
+        return None, errors, warnings
+    if effort not in EFFORTS:
+        errors.append(f"stage {stage_cfg.get('stage')}: effort {effort!r} must be one of {', '.join(EFFORTS)}")
+        return None, errors, warnings
+    if not allowed:
+        warnings.append(f"stage {stage_cfg.get('stage')}: model {model!r} does not support effort; omitting --effort")
+        return None, errors, warnings
+    if effort not in allowed:
+        message = f"stage {stage_cfg.get('stage')}: effort {effort!r} is not supported for model {model!r}; allowed: {', '.join(allowed)}"
+        if strict:
+            errors.append(message)
+            return None, errors, warnings
+        warnings.append(message + "; omitting --effort")
+        return None, errors, warnings
+    return effort, errors, warnings
+
+
+def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    if config.get("configVersion") != 1:
+        errors.append("configVersion must be 1")
+    if not isinstance(config.get("enabled", False), bool):
+        errors.append("enabled must be boolean")
+    if not isinstance(config.get("defaults"), dict):
+        errors.append("defaults must be object")
+    if not isinstance(config.get("stages"), dict):
+        errors.append("stages must be object")
+    for stage in (config.get("stages") or {}):
+        if stage not in STAGES:
+            errors.append(f"unknown stage {stage!r}; expected one of {', '.join(STAGES)}")
+    resolved = {}
+    for stage in STAGES:
+        stage_cfg = merged_stage(config, stage)
+        strict = bool(stage_cfg.get("strictEffort", True))
+        effective_effort, e, w = validate_model_effort(config, stage_cfg, strict=strict)
+        errors.extend(e)
+        warnings.extend(w)
+        stage_out = dict(stage_cfg)
+        stage_out["effectiveEffort"] = effective_effort
+        resolved[stage] = stage_out
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "enabled": bool(config.get("enabled", False)), "stages": resolved}
+
+
+def add_file(root: pathlib.Path, out: List[Dict[str, Any]], omitted: List[Dict[str, Any]], path: pathlib.Path, reason: str = "selected") -> None:
+    if not path.exists() or not path.is_file():
+        omitted.append({"path": str(path), "reason": "missing"})
+        return
+    try:
+        rp = rel(root, path)
+    except Exception:
+        omitted.append({"path": str(path), "reason": "outside-root"})
+        return
+    if is_denied(rp):
+        omitted.append({"path": rp, "reason": "denied"})
+        return
+    content = path.read_bytes()
+    out.append({"path": rp, "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content), "reason": reason})
+
+
+def change_dir(root: pathlib.Path, change: str) -> pathlib.Path:
+    return root / "openspec" / "changes" / change
+
+
+def change_spec_files(root: pathlib.Path, change: str) -> List[pathlib.Path]:
+    return sorted((change_dir(root, change) / "specs").glob("*/spec.md"))
+
+
+def add_specs_with_canonical(root: pathlib.Path, change: str, out: List[Dict[str, Any]], omitted: List[Dict[str, Any]]) -> None:
+    for spec in change_spec_files(root, change):
+        add_file(root, out, omitted, spec, "delta-spec")
+        capability = spec.parent.name
+        canonical = root / "openspec" / "specs" / capability / "spec.md"
+        if canonical.exists():
+            add_file(root, out, omitted, canonical, "canonical-spec")
+
+
+def add_common_context(root: pathlib.Path, out: List[Dict[str, Any]], omitted: List[Dict[str, Any]], include_adrs: bool = True) -> None:
+    for p in ["CONSTITUTION.md", "CONTEXT.md", "ARCHITECTURE.md", "adr/README.md"]:
+        add_file(root, out, omitted, root / p, "project-context")
+    if include_adrs:
+        for adr in sorted((root / "adr").glob("*.md")):
+            if adr.name != "README.md":
+                add_file(root, out, omitted, adr, "durable-adr")
+
+
+def collect_files(root: pathlib.Path, change: str, stage: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    out: List[Dict[str, Any]] = []
+    omitted: List[Dict[str, Any]] = []
+    cdir = change_dir(root, change)
+    def cf(name: str) -> pathlib.Path:
+        return cdir / name
+    if stage == "proposal":
+        add_file(root, out, omitted, cf("proposal.md"), "artifact")
+        add_common_context(root, out, omitted)
+    elif stage == "specs":
+        add_file(root, out, omitted, cf("proposal.md"), "dependency")
+        add_specs_with_canonical(root, change, out, omitted)
+    elif stage == "grill":
+        add_file(root, out, omitted, cf("proposal.md"), "dependency")
+        add_specs_with_canonical(root, change, out, omitted)
+        add_file(root, out, omitted, cf("grill.md"), "artifact")
+        add_common_context(root, out, omitted)
+    elif stage == "design":
+        for name in ["proposal.md", "grill.md", "design.md"]:
+            add_file(root, out, omitted, cf(name), "artifact" if name == "design.md" else "dependency")
+        add_specs_with_canonical(root, change, out, omitted)
+        add_common_context(root, out, omitted)
+        for doc in ["docs/lifecycle.md", "docs/update-safety.md"]:
+            add_file(root, out, omitted, root / doc, "project-doc")
+    elif stage == "design-review":
+        for name in ["proposal.md", "grill.md", "design.md", "design-review.md"]:
+            add_file(root, out, omitted, cf(name), "artifact" if name == "design-review.md" else "dependency")
+        add_specs_with_canonical(root, change, out, omitted)
+        add_common_context(root, out, omitted)
+    elif stage == "adr":
+        for name in ["grill.md", "design.md", "design-review.md", "adr.md"]:
+            add_file(root, out, omitted, cf(name), "artifact" if name == "adr.md" else "dependency")
+        add_common_context(root, out, omitted)
+    elif stage == "test-plan":
+        for name in ["design.md", "design-review.md", "adr.md", "test-plan.md"]:
+            add_file(root, out, omitted, cf(name), "artifact" if name == "test-plan.md" else "dependency")
+        add_specs_with_canonical(root, change, out, omitted)
+        add_file(root, out, omitted, root / ".codex" / "skills" / "tdd" / "SKILL.md", "tdd-skill")
+        add_common_context(root, out, omitted)
+    elif stage == "tasks":
+        for name in ["proposal.md", "grill.md", "design.md", "design-review.md", "adr.md", "test-plan.md", "tasks.md"]:
+            add_file(root, out, omitted, cf(name), "artifact" if name == "tasks.md" else "dependency")
+        add_specs_with_canonical(root, change, out, omitted)
+        add_common_context(root, out, omitted)
+    elif stage == "verify":
+        for name in ["proposal.md", "grill.md", "design.md", "design-review.md", "adr.md", "test-plan.md", "tasks.md"]:
+            add_file(root, out, omitted, cf(name), "artifact")
+        add_specs_with_canonical(root, change, out, omitted)
+        for report in sorted((cdir / "reviews").glob("*.json")):
+            add_file(root, out, omitted, report, "review-report")
+        add_common_context(root, out, omitted)
+    seen = set()
+    unique = []
+    for item in out:
+        if item["path"] not in seen:
+            seen.add(item["path"])
+            unique.append(item)
+    return unique, omitted
+
+
+def report_path(root: pathlib.Path, change: str, stage: str) -> pathlib.Path:
+    return change_dir(root, change) / "reviews" / f"{stage}-claude-review.json"
+
+
+def cost_summary(root: pathlib.Path, change: str) -> Dict[str, Any]:
+    reviews_dir = change_dir(root, change) / "reviews"
+    reports = sorted(reviews_dir.glob("*.json")) if reviews_dir.exists() else []
+    entries: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    total = decimal.Decimal("0")
+    costed = 0
+    missing = 0
+    for report in reports:
+        entry: Dict[str, Any] = {"path": rel(root, report)}
+        try:
+            data = json.loads(report.read_text(encoding="utf-8"))
+        except Exception as exc:
+            missing += 1
+            entry.update({"costAvailable": False, "warning": f"invalid JSON: {exc}"})
+            warnings.append(f"{rel(root, report)}: invalid JSON: {exc}")
+            entries.append(entry)
+            continue
+        if not isinstance(data, dict):
+            missing += 1
+            entry.update({"costAvailable": False, "warning": "report is not a JSON object"})
+            warnings.append(f"{rel(root, report)}: report is not a JSON object")
+            entries.append(entry)
+            continue
+        entry["stage"] = data.get("stage")
+        entry["verdict"] = data.get("verdict")
+        cost = data.get("cost") if isinstance(data.get("cost"), dict) else {}
+        raw_value = cost.get("total_cost_usd") if isinstance(cost, dict) else None
+        parsed = decimal_cost(raw_value)
+        if parsed is None:
+            missing += 1
+            entry["costAvailable"] = False
+            if raw_value is not None:
+                entry["warning"] = f"non-numeric total_cost_usd: {raw_value!r}"
+                warnings.append(f"{rel(root, report)}: non-numeric total_cost_usd")
+        else:
+            total += parsed
+            costed += 1
+            entry.update({
+                "costAvailable": True,
+                "totalCostUsd": float(parsed),
+                "totalCostUsdRaw": raw_value,
+            })
+        entries.append(entry)
+    return {
+        "schemaVersion": 1,
+        "change": change,
+        "reviewsDir": rel(root, reviews_dir) if reviews_dir.is_relative_to(root) else str(reviews_dir),
+        "reviewCount": len(reports),
+        "costedReviewCount": costed,
+        "missingCostCount": missing,
+        "totalCostUsd": float(total),
+        "entries": entries,
+        "warnings": warnings,
+    }
+
+
+def normalize_review(obj: Any) -> Dict[str, Any]:
+    # Claude Code `--output-format json --json-schema ...` returns a result
+    # envelope whose structured payload is in `structured_output`; `result` may
+    # be an empty string. Prefer the structured payload before falling back to a
+    # textual JSON result.
+    if isinstance(obj, dict):
+        for key in ("structured_output", "structuredOutput"):
+            if key in obj and obj[key] not in (None, ""):
+                so = obj[key]
+                obj = json.loads(so) if isinstance(so, str) else so
+                break
+    if isinstance(obj, dict) and "result" in obj and not {"verdict", "mustFix", "shouldFix"}.intersection(obj.keys()):
+        result = obj.get("result")
+        if isinstance(result, str):
+            try:
+                obj = json.loads(result)
+            except Exception:
+                # Some Claude Code JSON results may be text; treat as invalid structured result.
+                raise ValueError("result field is not valid JSON structured review output")
+        elif isinstance(result, dict):
+            obj = result
+    if not isinstance(obj, dict):
+        raise ValueError("review output must be a JSON object")
+    normalized = {
+        "verdict": obj.get("verdict"),
+        "mustFix": obj.get("mustFix", obj.get("must_fix", [])),
+        "shouldFix": obj.get("shouldFix", obj.get("should_fix", [])),
+        "questions": obj.get("questions", []),
+        "summary": obj.get("summary", ""),
+    }
+    if normalized["verdict"] not in REVIEW_VERDICTS - {"skipped"}:
+        raise ValueError(f"verdict must be one of pass/warn/fail/blocked, got {normalized['verdict']!r}")
+    for key in ["mustFix", "shouldFix", "questions"]:
+        if not isinstance(normalized[key], list):
+            raise ValueError(f"{key} must be an array")
+    if not isinstance(normalized["summary"], str) or not normalized["summary"].strip():
+        raise ValueError("summary must be a non-empty string")
+    return normalized
+
+
+def is_budget_exhausted_result(obj: Any, stderr: str = "") -> bool:
+    if isinstance(obj, dict):
+        subtype = str(obj.get("subtype") or "")
+        if subtype == "error_max_budget_usd":
+            return True
+        errors = obj.get("errors") or []
+        if isinstance(errors, list):
+            haystack = "\n".join(str(item) for item in errors)
+        else:
+            haystack = str(errors)
+        haystack = "\n".join([haystack, str(obj.get("result") or ""), str(obj.get("message") or "")])
+        if "maximum budget" in haystack.lower() or "max_budget_usd" in haystack.lower() or "maxbudgetusd" in haystack.lower():
+            return True
+    if stderr and ("maximum budget" in stderr.lower() or "max_budget_usd" in stderr.lower() or "maxbudgetusd" in stderr.lower()):
+        return True
+    return False
+
+
+def budget_exhausted_report(
+    base: Dict[str, Any],
+    root: pathlib.Path,
+    stage_cfg: Dict[str, Any],
+    raw_obj: Any,
+    command_exit: Optional[int] = None,
+    stderr: str = "",
+) -> Dict[str, Any]:
+    auto_disable = disable_session_claude_review(root)
+    cost = extract_cost(raw_obj)
+    claude_errors: List[str] = []
+    subtype: Optional[str] = None
+    if isinstance(raw_obj, dict):
+        subtype = raw_obj.get("subtype")
+        errors = raw_obj.get("errors") or []
+        if isinstance(errors, list):
+            claude_errors = [str(item) for item in errors[:5]]
+        elif errors:
+            claude_errors = [str(errors)]
+    must_fix = [
+        "Claude Code reached the configured maxBudgetUsd limit before producing a usable review.",
+        "Claude Review was automatically disabled for this session; raise or clear the budget cap and explicitly re-enable review if you want to retry.",
+    ]
+    if not auto_disable.get("disabled"):
+        must_fix.append("Automatic session disable failed; run /opsx:claude-review-off manually before continuing.")
+    base.update({
+        "verdict": "blocked",
+        "summary": "Claude review stopped because Claude Code reported that the configured budget was exhausted.",
+        "mustFix": must_fix,
+        "shouldFix": [],
+        "questions": [],
+        "budgetExhausted": True,
+        "budgetLimitUsd": stage_cfg.get("maxBudgetUsd"),
+        "claudeSubtype": subtype,
+        "claudeErrors": claude_errors,
+        "autoDisabledSessionReview": auto_disable,
+    })
+    if cost:
+        base["cost"] = cost
+    if command_exit is not None:
+        base["commandExit"] = command_exit
+    if stderr:
+        base["stderrPreview"] = stderr[:1000]
+    return base
+
+
+def policy_exit(verdict: str, block_on: Iterable[str]) -> int:
+    if verdict in set(block_on):
+        return 1
+    return 0
+
+
+def build_prompt(change: str, stage: str, files: List[Dict[str, Any]], root: pathlib.Path) -> str:
+    chunks = [
+        "You are reviewing generated OpenSpec artifacts as an independent Claude Code reviewer.",
+        "Return only structured JSON matching the requested schema.",
+        f"Change: {change}",
+        f"Stage: {stage}",
+        "Review for artifact consistency, missing requirements, unsupported assumptions, secret leakage risk, model/effort policy issues, and whether this stage should pass, warn, fail, or block.",
+        "Do not request or reveal secret values.",
+    ]
+    for item in files:
+        p = root / item["path"]
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        chunks.append(f"\n--- FILE: {item['path']} ---\n{text}\n--- END FILE: {item['path']} ---")
+    return "\n".join(chunks)
+
+
+def make_base_report(change: str, stage: str, stage_cfg: Dict[str, Any], effective_effort: Optional[str], files: List[Dict[str, Any]], omitted: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "change": change,
+        "stage": stage,
+        "modelConfigured": stage_cfg.get("model"),
+        "effortConfigured": stage_cfg.get("effort"),
+        "effortEffective": effective_effort,
+        "budgetLimitUsd": stage_cfg.get("maxBudgetUsd"),
+        "fallbackModel": stage_cfg.get("fallbackModel"),
+        "command": {
+            "outputFormat": "json",
+            "permissionMode": stage_cfg.get("permissionMode", "dontAsk"),
+            "tools": stage_cfg.get("tools", "none"),
+            "inputMode": stage_cfg.get("inputMode", "bundle"),
+        },
+        "reviewedFiles": files,
+        "omittedContext": omitted,
+        "reviewedAt": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run or validate optional Claude Code reviews for OpenSpec artifacts.")
+    parser.add_argument("--change")
+    parser.add_argument("--stage", choices=STAGES)
+    parser.add_argument("--config")
+    parser.add_argument("--validate-config", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--parse-file")
+    parser.add_argument("--write-report", action="store_true")
+    parser.add_argument("--cost-summary", action="store_true")
+    args = parser.parse_args()
+
+    root = find_root()
+    if args.cost_summary:
+        if not args.change:
+            eprint("--change is required with --cost-summary")
+            return 2
+        write_json(cost_summary(root, args.change))
+        return 0
+
+    config_path = pathlib.Path(args.config).resolve() if args.config else root / ".codex" / "openspec-claude-review.json"
+    try:
+        config = load_json(config_path)
+    except Exception as exc:
+        eprint(f"config error: {exc}")
+        return 2
+
+    validation = validate_config(config)
+    if args.validate_config:
+        write_json({"configPath": rel(root, config_path) if config_path.is_relative_to(root) else str(config_path), **validation})
+        return 0 if validation["valid"] else 2
+    if not validation["valid"]:
+        write_json({"configPath": str(config_path), **validation})
+        return 2
+    if not args.change or not args.stage:
+        eprint("--change and --stage are required unless --validate-config is used")
+        return 2
+
+    stage_cfg = merged_stage(config, args.stage)
+    effective_effort, errors, warnings = validate_model_effort(config, stage_cfg, strict=bool(stage_cfg.get("strictEffort", True)))
+    if errors:
+        write_json({"valid": False, "errors": errors, "warnings": warnings})
+        return 2
+    files, omitted = collect_files(root, args.change, args.stage)
+    base = make_base_report(args.change, args.stage, stage_cfg, effective_effort, files, omitted)
+    base["warnings"] = warnings
+    out_path = report_path(root, args.change, args.stage)
+    base["reportPath"] = rel(root, out_path)
+
+    if not stage_cfg.get("enabled"):
+        base.update({"verdict": "skipped", "summary": "Claude review skipped because global or stage configuration disables it.", "mustFix": [], "shouldFix": [], "questions": [], "dryRun": bool(args.dry_run)})
+        write_json(base)
+        return 3
+
+    if args.dry_run:
+        base.update({"verdict": "pass", "summary": "Dry run only; no Claude invocation was made.", "mustFix": [], "shouldFix": [], "questions": [], "dryRun": True})
+        write_json(base)
+        return 0
+
+    if args.parse_file:
+        try:
+            raw = json.loads(pathlib.Path(args.parse_file).read_text(encoding="utf-8"))
+            if is_budget_exhausted_result(raw):
+                base = budget_exhausted_report(base, root, stage_cfg, raw)
+                if args.write_report or stage_cfg.get("persistReport", True):
+                    write_json(base, out_path)
+                else:
+                    write_json(base)
+                return 2
+            review = normalize_review(raw)
+        except Exception as exc:
+            base.update({"verdict": "blocked", "summary": f"Invalid structured review output: {exc}", "mustFix": [str(exc)], "shouldFix": [], "questions": [], "parseError": True})
+            if args.write_report or stage_cfg.get("persistReport", True):
+                write_json(base, out_path)
+            else:
+                write_json(base)
+            return 2
+        base.update(review)
+        cost = extract_cost(raw)
+        if cost:
+            base["cost"] = cost
+        if args.write_report or stage_cfg.get("persistReport", True):
+            write_json(base, out_path)
+        else:
+            write_json(base)
+        return policy_exit(base["verdict"], stage_cfg.get("blockOn", ["fail", "blocked"]))
+
+    claude = shutil.which("claude")
+    if not claude:
+        base.update({"verdict": "blocked", "summary": "Claude executable was not found in PATH.", "mustFix": ["Install or authenticate Claude Code, or disable/configure unavailablePolicy for this stage."], "shouldFix": [], "questions": [], "unavailable": True})
+        write_json(base)
+        return 2 if stage_cfg.get("unavailablePolicy") == "block" else 3
+
+    prompt = build_prompt(args.change, args.stage, files, root)
+    cmd = [claude, "-p", "--model", str(stage_cfg.get("model")), "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA), "--permission-mode", str(stage_cfg.get("permissionMode", "dontAsk")), "--tools", ""]
+    if effective_effort:
+        cmd.extend(["--effort", effective_effort])
+    if stage_cfg.get("fallbackModel"):
+        cmd.extend(["--fallback-model", str(stage_cfg.get("fallbackModel"))])
+    if stage_cfg.get("maxBudgetUsd") is not None:
+        cmd.extend(["--max-budget-usd", str(stage_cfg.get("maxBudgetUsd"))])
+    try:
+        proc = subprocess.run(cmd, input=prompt, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(root), timeout=int(stage_cfg.get("timeoutSeconds", 600)))
+    except subprocess.TimeoutExpired:
+        base.update({"verdict": "blocked", "summary": "Claude review timed out.", "mustFix": ["Increase timeout or reduce review input."], "shouldFix": [], "questions": [], "timeout": True})
+        write_json(base)
+        return 2
+    if proc.returncode != 0:
+        try:
+            raw_error = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        except Exception:
+            raw_error = {}
+        if is_budget_exhausted_result(raw_error, proc.stderr):
+            base = budget_exhausted_report(base, root, stage_cfg, raw_error, command_exit=proc.returncode, stderr=proc.stderr)
+            write_json(base, out_path if stage_cfg.get("persistReport", True) else None)
+            return 2
+        hints = ["claude -p exited non-zero; inspect local auth/provider/config."]
+        if stage_cfg.get("maxBudgetUsd") is not None:
+            hints.append("If stderr is empty, maxBudgetUsd may be lower than Claude Code's startup/cache cost for structured output; raise or unset it for this stage.")
+        base.update({"verdict": "blocked", "summary": "Claude review command failed.", "mustFix": hints, "shouldFix": [], "questions": [], "commandExit": proc.returncode, "stderrPreview": proc.stderr[:1000]})
+        write_json(base)
+        return 2 if stage_cfg.get("unavailablePolicy") == "block" else 3
+    try:
+        raw = json.loads(proc.stdout)
+        if is_budget_exhausted_result(raw):
+            base = budget_exhausted_report(base, root, stage_cfg, raw, command_exit=proc.returncode, stderr=proc.stderr)
+            write_json(base, out_path if stage_cfg.get("persistReport", True) else None)
+            return 2
+        review = normalize_review(raw)
+    except Exception as exc:
+        base.update({"verdict": "blocked", "summary": f"Invalid structured review output: {exc}", "mustFix": [str(exc)], "shouldFix": [], "questions": [], "parseError": True})
+        write_json(base, out_path if stage_cfg.get("persistReport", True) else None)
+        return 2
+    base.update(review)
+    # Preserve basic Claude Code metadata when present.
+    cost = extract_cost(raw)
+    if cost:
+        base["cost"] = cost
+    if stage_cfg.get("persistReport", True):
+        write_json(base, out_path)
+    else:
+        write_json(base)
+    return policy_exit(base["verdict"], stage_cfg.get("blockOn", ["fail", "blocked"]))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY

@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$@" <<'PYCODE'
+import argparse, datetime as dt, decimal, fnmatch, hashlib, json, os, pathlib, sys, urllib.error, urllib.request
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+STAGES = ["proposal", "specs", "grill", "design", "design-review", "adr", "test-plan", "tasks", "verify"]
+REVIEW_VERDICTS = {"pass", "warn", "fail", "blocked", "skipped"}
+STRUCTURED_MODES = {"auto", "json_schema", "json_object", "prompt_only", "off"}
+DENY_PATTERNS = [
+    ".secrets.local.env", ".secrets.*.local.env", ".env.local", ".env.*.local",
+    ".claude/**", "**/.claude/**", "**/*secret*", "**/*token*", "**/*credential*",
+]
+REVIEW_SCHEMA = {
+    "type": "object",
+    "additionalProperties": True,
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "warn", "fail", "blocked"]},
+        "mustFix": {"type": "array", "items": {"type": "string"}},
+        "shouldFix": {"type": "array", "items": {"type": "string"}},
+        "questions": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"}
+    },
+    "required": ["verdict", "summary"]
+}
+
+def eprint(*args: Any) -> None:
+    print(*args, file=sys.stderr)
+
+def find_root() -> pathlib.Path:
+    cwd = pathlib.Path.cwd().resolve()
+    if (cwd / "openspec" / "config.yaml").exists() and (cwd / ".codex").exists():
+        return cwd
+    try:
+        import subprocess
+        out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], cwd=str(cwd), text=True).strip()
+        return pathlib.Path(out).resolve()
+    except Exception:
+        return cwd
+
+def rel(root: pathlib.Path, path: pathlib.Path) -> str:
+    return path.resolve().relative_to(root).as_posix()
+
+def is_denied(relpath: str) -> bool:
+    name = pathlib.PurePosixPath(relpath).name
+    return any(fnmatch.fnmatch(relpath, pat) or fnmatch.fnmatch(name, pat) for pat in DENY_PATTERNS)
+
+def load_json(path: pathlib.Path) -> Dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"config must be a JSON object: {path}")
+    return data
+
+def write_json(obj: Dict[str, Any], path: Optional[pathlib.Path] = None) -> None:
+    text = json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True)
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text + "\n", encoding="utf-8")
+    print(text)
+
+def endpoint_url(provider: Dict[str, Any]) -> str:
+    base = str(provider.get("baseUrl") or "").rstrip("/")
+    endpoint = str(provider.get("endpoint") or "chat/completions").lstrip("/")
+    return f"{base}/{endpoint}"
+
+def deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    out = json.loads(json.dumps(a))
+    for k, v in b.items():
+        if v is None:
+            out.pop(k, None)
+        elif isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+def merged_stage(config: Dict[str, Any], stage: str) -> Dict[str, Any]:
+    defaults = dict(config.get("defaults") or {})
+    stages = config.get("stages") or {}
+    stage_cfg = dict(stages.get(stage) or {})
+    merged = deep_merge(defaults, stage_cfg)
+    merged["stage"] = stage
+    merged["provider"] = deep_merge(config.get("provider") or {}, stage_cfg.get("provider") or {})
+    if isinstance(defaults.get("requestProvider"), dict) or isinstance(stage_cfg.get("requestProvider"), dict):
+        merged["requestProvider"] = deep_merge(defaults.get("requestProvider") or {}, stage_cfg.get("requestProvider") or {})
+    merged["globalEnabled"] = bool(config.get("enabled", False))
+    merged["stageEnabled"] = bool(stage_cfg.get("enabled", True))
+    merged["enabled"] = bool(merged["globalEnabled"] and merged["stageEnabled"])
+    if "effort" in merged:
+        reasoning = dict(merged.get("reasoning") or {})
+        reasoning.setdefault("effort", merged.get("effort"))
+        merged["reasoning"] = reasoning
+    return merged
+
+def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    if config.get("configVersion") != 1:
+        errors.append("configVersion must be 1")
+    if not isinstance(config.get("enabled", False), bool):
+        errors.append("enabled must be boolean")
+    provider = config.get("provider")
+    if not isinstance(provider, dict):
+        errors.append("provider must be object")
+        provider = {}
+    if provider.get("type", "openai-compatible") != "openai-compatible":
+        errors.append("provider.type must be openai-compatible")
+    if not isinstance(provider.get("baseUrl"), str) or not provider.get("baseUrl", "").startswith(("https://", "http://")):
+        errors.append("provider.baseUrl must be an http(s) URL")
+    if not isinstance(provider.get("apiKeyEnv"), str) or not provider.get("apiKeyEnv"):
+        errors.append("provider.apiKeyEnv must name an environment variable")
+    if not isinstance(config.get("defaults"), dict):
+        errors.append("defaults must be object")
+    if not isinstance(config.get("stages"), dict):
+        errors.append("stages must be object")
+    for stage in (config.get("stages") or {}):
+        if stage not in STAGES:
+            errors.append(f"unknown stage {stage!r}; expected one of {', '.join(STAGES)}")
+    resolved: Dict[str, Any] = {}
+    for stage in STAGES:
+        s = merged_stage(config, stage)
+        if not isinstance(s.get("model"), str) or not s.get("model", "").strip():
+            errors.append(f"stage {stage}: model must be a non-empty string")
+        mode = s.get("structuredOutputMode", "prompt_only")
+        if mode not in STRUCTURED_MODES:
+            errors.append(f"stage {stage}: structuredOutputMode must be one of {', '.join(sorted(STRUCTURED_MODES))}")
+        request_provider = s.get("requestProvider")
+        if request_provider is not None and not isinstance(request_provider, dict):
+            errors.append(f"stage {stage}: requestProvider must be an object when set")
+        resolved[stage] = sanitize_stage_for_report(s)
+    return {"valid": not errors, "errors": errors, "warnings": warnings, "enabled": bool(config.get("enabled", False)), "stages": resolved}
+
+def sanitize_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": provider.get("type", "openai-compatible"),
+        "baseUrl": provider.get("baseUrl"),
+        "endpoint": provider.get("endpoint", "chat/completions"),
+        "apiKeyEnv": provider.get("apiKeyEnv"),
+        "apiKeyPresent": bool(os.environ.get(str(provider.get("apiKeyEnv") or ""))),
+    }
+
+def sanitize_stage_for_report(stage_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(stage_cfg)
+    if isinstance(out.get("provider"), dict):
+        out["provider"] = sanitize_provider(out["provider"])
+    return out
+
+def add_file(root: pathlib.Path, out: List[Dict[str, Any]], omitted: List[Dict[str, Any]], path: pathlib.Path, reason: str = "selected") -> None:
+    if not path.exists() or not path.is_file():
+        omitted.append({"path": str(path), "reason": "missing"}); return
+    try:
+        rp = rel(root, path)
+    except Exception:
+        omitted.append({"path": str(path), "reason": "outside-root"}); return
+    if is_denied(rp):
+        omitted.append({"path": rp, "reason": "denied"}); return
+    content = path.read_bytes()
+    out.append({"path": rp, "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content), "reason": reason})
+
+def change_dir(root: pathlib.Path, change: str) -> pathlib.Path:
+    return root / "openspec" / "changes" / change
+
+def change_spec_files(root: pathlib.Path, change: str) -> List[pathlib.Path]:
+    return sorted((change_dir(root, change) / "specs").glob("*/spec.md"))
+
+def add_specs_with_canonical(root: pathlib.Path, change: str, out: List[Dict[str, Any]], omitted: List[Dict[str, Any]]) -> None:
+    for spec in change_spec_files(root, change):
+        add_file(root, out, omitted, spec, "delta-spec")
+        canonical = root / "openspec" / "specs" / spec.parent.name / "spec.md"
+        if canonical.exists(): add_file(root, out, omitted, canonical, "canonical-spec")
+
+def add_common_context(root: pathlib.Path, out: List[Dict[str, Any]], omitted: List[Dict[str, Any]], include_adrs: bool = True) -> None:
+    for p in ["CONSTITUTION.md", "CONTEXT.md", "ARCHITECTURE.md", "adr/README.md"]:
+        add_file(root, out, omitted, root / p, "project-context")
+    if include_adrs:
+        for adr in sorted((root / "adr").glob("*.md")):
+            if adr.name != "README.md": add_file(root, out, omitted, adr, "durable-adr")
+
+def collect_files(root: pathlib.Path, change: str, stage: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    out: List[Dict[str, Any]] = []; omitted: List[Dict[str, Any]] = []
+    cdir = change_dir(root, change); cf = lambda n: cdir / n
+    stage_files = {
+        "proposal": ["proposal.md"],
+        "grill": ["proposal.md", "grill.md"],
+        "design": ["proposal.md", "grill.md", "design.md"],
+        "design-review": ["proposal.md", "grill.md", "design.md", "design-review.md"],
+        "adr": ["grill.md", "design.md", "design-review.md", "adr.md"],
+        "test-plan": ["design.md", "design-review.md", "adr.md", "test-plan.md"],
+        "tasks": ["proposal.md", "grill.md", "design.md", "design-review.md", "adr.md", "test-plan.md", "tasks.md"],
+        "verify": ["proposal.md", "grill.md", "design.md", "design-review.md", "adr.md", "test-plan.md", "tasks.md"],
+    }
+    if stage == "specs":
+        add_file(root, out, omitted, cf("proposal.md"), "dependency"); add_specs_with_canonical(root, change, out, omitted)
+    else:
+        for name in stage_files.get(stage, []): add_file(root, out, omitted, cf(name), "artifact" if name.endswith(f"{stage}.md") else "dependency")
+        if stage in {"design", "design-review", "test-plan", "tasks", "verify", "grill"}: add_specs_with_canonical(root, change, out, omitted)
+    if stage == "verify":
+        for report in sorted((cdir / "reviews").glob("*.json")): add_file(root, out, omitted, report, "review-report")
+    add_common_context(root, out, omitted)
+    seen = set(); unique = []
+    for item in out:
+        if item["path"] not in seen:
+            seen.add(item["path"]); unique.append(item)
+    return unique, omitted
+
+def report_path(root: pathlib.Path, change: str, stage: str) -> pathlib.Path:
+    return change_dir(root, change) / "reviews" / f"{stage}-artifact-review.json"
+
+def build_prompt(change: str, stage: str, files: List[Dict[str, Any]], root: pathlib.Path) -> str:
+    chunks = [
+        "You are an independent OpenSpec artifact reviewer.",
+        "Return ONLY a JSON object matching this schema: {verdict: pass|warn|fail|blocked, summary: string, mustFix: string[], shouldFix: string[], questions: string[]}.",
+        "Review for artifact consistency, missing requirements, unsupported assumptions, secret leakage risk, provider/review policy issues, and whether this stage should pass, warn, fail, or block.",
+        "Do not request or reveal secret values.",
+        f"Change: {change}", f"Stage: {stage}",
+    ]
+    for item in files:
+        p = root / item["path"]
+        try: text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError: text = p.read_text(encoding="utf-8", errors="replace")
+        chunks.append(f"\n--- FILE: {item['path']} ---\n{text}\n--- END FILE: {item['path']} ---")
+    return "\n".join(chunks)
+
+def build_request(stage_cfg: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "model": stage_cfg.get("model"),
+        "messages": [
+            {"role": "system", "content": "You review OpenSpec artifacts. Output only valid JSON matching the requested review schema."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": stage_cfg.get("temperature", 0),
+    }
+    if stage_cfg.get("maxTokens") is not None:
+        body["max_tokens"] = int(stage_cfg.get("maxTokens"))
+    request_provider = stage_cfg.get("requestProvider")
+    if isinstance(request_provider, dict) and request_provider:
+        body["provider"] = request_provider
+    reasoning = stage_cfg.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("enabled"):
+        body["reasoning"] = {k: v for k, v in reasoning.items() if k != "enabled" and v is not None}
+    mode = stage_cfg.get("structuredOutputMode", "prompt_only")
+    if mode == "json_object": body["response_format"] = {"type": "json_object"}
+    elif mode == "json_schema": body["response_format"] = {"type": "json_schema", "json_schema": {"name": "openspec_artifact_review", "schema": REVIEW_SCHEMA, "strict": True}}
+    return body
+
+def parse_json_text(text: str) -> Any:
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(candidate[start:end + 1])
+        raise
+
+def normalize_review(obj: Any) -> Dict[str, Any]:
+    if isinstance(obj, dict) and "choices" in obj:
+        try: content = obj["choices"][0]["message"]["content"]
+        except Exception as exc: raise ValueError(f"chat completion response missing choices[0].message.content: {exc}")
+        obj = parse_json_text(content) if isinstance(content, str) else content
+    elif isinstance(obj, dict) and "result" in obj and not {"verdict", "summary"}.intersection(obj):
+        result = obj.get("result")
+        obj = parse_json_text(result) if isinstance(result, str) else result
+    if not isinstance(obj, dict): raise ValueError("review output must be a JSON object")
+    normalized = {
+        "verdict": obj.get("verdict"),
+        "mustFix": obj.get("mustFix", obj.get("must_fix", [])),
+        "shouldFix": obj.get("shouldFix", obj.get("should_fix", [])),
+        "questions": obj.get("questions", []),
+        "summary": obj.get("summary", ""),
+    }
+    if normalized["verdict"] not in REVIEW_VERDICTS - {"skipped"}: raise ValueError(f"verdict must be one of pass/warn/fail/blocked, got {normalized['verdict']!r}")
+    for key in ["mustFix", "shouldFix", "questions"]:
+        if not isinstance(normalized[key], list): raise ValueError(f"{key} must be an array")
+        normalized[key] = [str(x) for x in normalized[key]]
+    if not isinstance(normalized["summary"], str) or not normalized["summary"].strip(): raise ValueError("summary must be a non-empty string")
+    return normalized
+
+def extract_cost(obj: Any) -> Dict[str, Any]:
+    if not isinstance(obj, dict): return {}
+    usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
+    cost: Dict[str, Any] = {}
+    for key in ["prompt_tokens", "completion_tokens", "total_tokens"]:
+        if usage.get(key) is not None: cost[key] = usage.get(key)
+    if usage.get("cost") is not None: cost["total_cost"] = usage.get("cost")
+    if usage.get("cost_rub") is not None:
+        cost["total_cost_rub"] = usage.get("cost_rub"); cost["currency"] = "RUB"
+    elif cost.get("total_cost") is not None:
+        cost["currency"] = usage.get("currency", "provider")
+    return cost
+
+def decimal_cost(value: Any) -> Optional[decimal.Decimal]:
+    if isinstance(value, bool) or value is None: return None
+    try: return decimal.Decimal(str(value))
+    except Exception: return None
+
+def make_base_report(change: str, stage: str, stage_cfg: Dict[str, Any], files: List[Dict[str, Any]], omitted: List[Dict[str, Any]]) -> Dict[str, Any]:
+    provider = stage_cfg.get("provider") or {}
+    return {
+        "schemaVersion": 1, "change": change, "stage": stage,
+        "modelConfigured": stage_cfg.get("model"), "effortConfigured": stage_cfg.get("effort"), "effortEffective": (stage_cfg.get("reasoning") or {}).get("effort", stage_cfg.get("effort")) if isinstance(stage_cfg.get("reasoning"), dict) else stage_cfg.get("effort"),
+        "provider": sanitize_provider(provider),
+        "requestProvider": stage_cfg.get("requestProvider") if isinstance(stage_cfg.get("requestProvider"), dict) else None,
+        "budgetLimitRub": stage_cfg.get("maxBudgetRub"), "budgetLimitUsd": stage_cfg.get("maxBudgetUsd"),
+        "command": {"api": "chat/completions", "structuredOutputMode": stage_cfg.get("structuredOutputMode", "prompt_only"), "inputMode": stage_cfg.get("inputMode", "bundle")},
+        "reviewedFiles": files, "omittedContext": omitted,
+        "reviewedAt": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+
+def policy_exit(verdict: str, block_on: Iterable[str]) -> int:
+    return 1 if verdict in set(block_on) else 0
+
+def review_cost_ledger_path(root: pathlib.Path, change: str) -> pathlib.Path:
+    return change_dir(root, change) / "reviews" / "artifact-review-costs.jsonl"
+
+def append_cost_ledger(root: pathlib.Path, report: Dict[str, Any], cost: Dict[str, Any]) -> None:
+    ledger = review_cost_ledger_path(root, str(report.get("change") or ""))
+    entry = {
+        "schemaVersion": 1,
+        "change": report.get("change"),
+        "stage": report.get("stage"),
+        "reviewedAt": report.get("reviewedAt"),
+        "reportPath": report.get("reportPath"),
+        "verdict": report.get("verdict"),
+        "modelConfigured": report.get("modelConfigured"),
+        "provider": report.get("provider"),
+        "requestProvider": report.get("requestProvider"),
+        "costAvailable": bool(cost),
+        "cost": cost if cost else {},
+    }
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+
+def summarize_cost_entries(entries: List[Dict[str, Any]]) -> Tuple[decimal.Decimal, int, int]:
+    total_rub = decimal.Decimal("0"); costed_rub = 0; missing = 0
+    for entry in entries:
+        cost = entry.get("cost") if isinstance(entry.get("cost"), dict) else {}
+        rub = decimal_cost(cost.get("total_cost_rub"))
+        if rub is not None:
+            total_rub += rub; costed_rub += 1; entry.update({"costAvailable": True, "totalCostRub": float(rub)})
+        else:
+            missing += 1; entry["costAvailable"] = False
+    return total_rub, costed_rub, missing
+
+def compact_cost_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: summary.get(k) for k in ["source", "totalCostRub", "invocationCount", "reviewCount", "costedReviewCount", "missingCostCount", "ledgerPath", "reviewsDir"] if k in summary}
+
+def cost_summary(root: pathlib.Path, change: str) -> Dict[str, Any]:
+    reviews_dir = change_dir(root, change) / "reviews"
+    ledger = review_cost_ledger_path(root, change)
+    if ledger.exists():
+        entries: List[Dict[str, Any]] = []
+        for lineno, line in enumerate(ledger.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+                if not isinstance(data, dict): raise ValueError("entry is not an object")
+                data.setdefault("ledgerLine", lineno)
+                entries.append(data)
+            except Exception as exc:
+                entries.append({"ledgerLine": lineno, "costAvailable": False, "warning": f"invalid JSONL entry: {exc}"})
+        total_rub, costed_rub, missing = summarize_cost_entries(entries)
+        return {"schemaVersion": 1, "change": change, "source": "ledger", "reviewsDir": rel(root, reviews_dir) if reviews_dir.exists() else rel(root, reviews_dir), "ledgerPath": rel(root, ledger), "reviewCount": len(entries), "invocationCount": len(entries), "costedReviewCount": costed_rub, "missingCostCount": missing, "totalCostRub": float(total_rub), "entries": entries}
+    reports = sorted(p for p in reviews_dir.glob("*.json") if p.name != "artifact-review-costs.json") if reviews_dir.exists() else []
+    entries = []
+    for report in reports:
+        entry: Dict[str, Any] = {"path": rel(root, report)}
+        try: data = json.loads(report.read_text(encoding="utf-8"))
+        except Exception as exc:
+            entry.update({"costAvailable": False, "warning": f"invalid JSON: {exc}"}); entries.append(entry); continue
+        entry["stage"] = data.get("stage"); entry["verdict"] = data.get("verdict"); entry["cost"] = data.get("cost") if isinstance(data.get("cost"), dict) else {}
+        entries.append(entry)
+    total_rub, costed_rub, missing = summarize_cost_entries(entries)
+    return {"schemaVersion": 1, "change": change, "source": "reports", "reviewsDir": rel(root, reviews_dir) if reviews_dir.exists() else rel(root, reviews_dir), "reviewCount": len(reports), "invocationCount": len(reports), "costedReviewCount": costed_rub, "missingCostCount": missing, "totalCostRub": float(total_rub), "entries": entries}
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run or validate OpenAI-compatible OpenSpec artifact reviews.")
+    parser.add_argument("--change"); parser.add_argument("--stage", choices=STAGES); parser.add_argument("--config")
+    parser.add_argument("--validate-config", action="store_true"); parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--parse-file"); parser.add_argument("--write-report", action="store_true"); parser.add_argument("--cost-summary", action="store_true")
+    args = parser.parse_args(); root = find_root()
+    if args.cost_summary:
+        if not args.change: eprint("--change is required with --cost-summary"); return 2
+        write_json(cost_summary(root, args.change)); return 0
+    config_path = pathlib.Path(args.config).resolve() if args.config else root / ".codex" / "openspec-artifact-review.json"
+    try: config = load_json(config_path)
+    except Exception as exc: eprint(f"config error: {exc}"); return 2
+    validation = validate_config(config)
+    if args.validate_config:
+        write_json({"configPath": rel(root, config_path) if config_path.is_relative_to(root) else str(config_path), **validation}); return 0 if validation["valid"] else 2
+    if not validation["valid"]: write_json({"configPath": str(config_path), **validation}); return 2
+    if not args.change or not args.stage: eprint("--change and --stage are required unless --validate-config is used"); return 2
+    stage_cfg = merged_stage(config, args.stage)
+    files, omitted = collect_files(root, args.change, args.stage)
+    base = make_base_report(args.change, args.stage, stage_cfg, files, omitted)
+    out_path = report_path(root, args.change, args.stage); base["reportPath"] = rel(root, out_path)
+    if not stage_cfg.get("enabled"):
+        base.update({"verdict": "skipped", "summary": "Artifact review skipped because global or stage configuration disables it.", "mustFix": [], "shouldFix": [], "questions": [], "dryRun": bool(args.dry_run)})
+        write_json(base); return 3
+    prompt = build_prompt(args.change, args.stage, files, root)
+    request_body = build_request(stage_cfg, prompt)
+    if args.dry_run:
+        safe_body = dict(request_body); safe_body["messages"] = [{"role": m["role"], "contentBytes": len(str(m.get("content", "")))} for m in request_body["messages"]]
+        base.update({"verdict": "pass", "summary": "Dry run only; no provider invocation was made.", "mustFix": [], "shouldFix": [], "questions": [], "dryRun": True, "requestPreview": safe_body})
+        write_json(base); return 0
+    raw: Any = None
+    live_provider_call = False
+    if args.parse_file:
+        try: raw = json.loads(pathlib.Path(args.parse_file).read_text(encoding="utf-8"))
+        except Exception as exc:
+            base.update({"verdict": "blocked", "summary": f"Invalid parse fixture: {exc}", "mustFix": [str(exc)], "shouldFix": [], "questions": [], "parseError": True}); write_json(base, out_path if args.write_report else None); return 1
+    else:
+        provider = stage_cfg.get("provider") or {}; key_env = str(provider.get("apiKeyEnv") or "")
+        api_key = os.environ.get(key_env)
+        if not api_key:
+            base.update({"verdict": "blocked", "summary": "Artifact review provider API key is not available.", "mustFix": [f"Set local environment variable {key_env} without committing its value."], "shouldFix": [], "questions": [], "unavailable": True})
+            write_json(base, out_path if stage_cfg.get("persistReport", True) else None); return policy_exit(base["verdict"], stage_cfg.get("blockOn", ["fail", "blocked"]))
+        req = urllib.request.Request(endpoint_url(provider), data=json.dumps(request_body).encode("utf-8"), headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=int(stage_cfg.get("timeoutSeconds", 120))) as resp:
+                raw = json.loads(resp.read().decode("utf-8"))
+                live_provider_call = True
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:1000]
+            base.update({"verdict": "blocked", "summary": "Artifact review provider request failed.", "mustFix": [f"Provider HTTP error {exc.code}; inspect local provider/account/model settings."], "shouldFix": [], "questions": [], "providerError": True, "httpStatus": exc.code, "errorPreview": body})
+            write_json(base, out_path if stage_cfg.get("persistReport", True) else None); return 1
+        except Exception as exc:
+            base.update({"verdict": "blocked", "summary": "Artifact review provider request failed.", "mustFix": [str(exc)], "shouldFix": [], "questions": [], "providerError": True})
+            write_json(base, out_path if stage_cfg.get("persistReport", True) else None); return 1
+    try:
+        review = normalize_review(raw)
+    except Exception as exc:
+        cost = extract_cost(raw)
+        base.update({"verdict": "blocked", "summary": f"Invalid structured review output: {exc}", "mustFix": [str(exc)], "shouldFix": [], "questions": [], "parseError": True})
+        if cost: base["cost"] = cost
+        if live_provider_call:
+            append_cost_ledger(root, base, cost)
+            base["costSummary"] = compact_cost_summary(cost_summary(root, args.change))
+        write_json(base, out_path if stage_cfg.get("persistReport", True) else None); return 1
+    base.update(review)
+    cost = extract_cost(raw)
+    if cost: base["cost"] = cost
+    if live_provider_call:
+        append_cost_ledger(root, base, cost)
+        base["costSummary"] = compact_cost_summary(cost_summary(root, args.change))
+    rub = decimal_cost(cost.get("total_cost_rub") if cost else None); cap = decimal_cost(stage_cfg.get("maxBudgetRub"))
+    if rub is not None and cap is not None and rub > cap:
+        base.update({"verdict": "blocked", "budgetExhausted": True, "summary": "Artifact review exceeded configured RUB budget cap.", "mustFix": ["Raise or clear maxBudgetRub and retry if this review is required."]})
+    write_json(base, out_path if stage_cfg.get("persistReport", True) or args.write_report else None)
+    return policy_exit(base["verdict"], stage_cfg.get("blockOn", ["fail", "blocked"]))
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PYCODE

@@ -1,0 +1,144 @@
+version: 3
+template: intent-driven-codex
+release: 0.1.8
+
+repairSources:
+  root: .codex/codex-openspec-powers/template
+  pathRule: "For every templateOwnedPaths or createOnlyPaths target except the source bundle itself, the bundled repair source is root + '/' + target path."
+  exclude:
+    - .codex/codex-openspec-powers/template/**
+
+precedence:
+  - Template-owned overlay files are safe to repair from the bundled template.
+  - Project context, OpenSpec config, and ADR index are seeded when missing but never replaced automatically by auto-repair.
+  - OpenSpec change/archive/spec history is project state and is never repaired silently.
+
+templateOwnedPaths:
+  - bin/opsx
+  - bin/openspec-shim
+  - manifest.yaml
+  - .codex/openspec-artifact-review.json
+  - .codex/prompts/opsx-apply.md
+  - .codex/prompts/opsx-archive.md
+  - .codex/prompts/opsx-bulk-apply.md
+  - .codex/prompts/opsx-bulk-archive.md
+  - .codex/prompts/opsx-check-overlay.md
+  - .codex/prompts/opsx-review-off.md
+  - .codex/prompts/opsx-review-on.md
+  - .codex/prompts/opsx-review-reset.md
+  - .codex/prompts/opsx-review-set.md
+  - .codex/prompts/opsx-review-status.md
+  - .codex/prompts/opsx-continue.md
+  - .codex/prompts/opsx-explore.md
+  - .codex/prompts/opsx-ff.md
+  - .codex/prompts/opsx-new.md
+  - .codex/prompts/opsx-propose.md
+  - .codex/prompts/opsx-sync.md
+  - .codex/prompts/opsx-verify.md
+  - .codex/skills/architectural-decision-records/**
+  - .codex/skills/c4-diagrams/**
+  - .codex/skills/gherkin-authoring/**
+  - .codex/skills/grill-with-docs/**
+  - .codex/skills/openspec-apply-change/**
+  - .codex/skills/openspec-archive-change/**
+  - .codex/skills/openspec-bulk-apply-change/**
+  - .codex/skills/openspec-bulk-archive-change/**
+  - .codex/skills/openspec-check-overlay/**
+  - .codex/skills/openspec-continue-change/**
+  - .codex/skills/openspec-explore/**
+  - .codex/skills/openspec-ff-change/**
+  - .codex/skills/openspec-git-discipline/**
+  - .codex/skills/openspec-new-change/**
+  - .codex/skills/openspec-onboard/**
+  - .codex/skills/openspec-propose/**
+  - .codex/skills/openspec-sync-specs/**
+  - .codex/skills/openspec-verify-change/**
+  - .codex/skills/project-constitution/**
+  - .codex/skills/tdd/**
+  - openspec/README.md
+  - openspec/schemas/intent-driven/**
+  - scripts/check-overlay
+  - scripts/install-overlay
+  - scripts/test-auto-repair-tooling
+  - scripts/openspec-artifact-review
+  - scripts/openspec-git-checkpoint
+  - scripts/openspec-session-state
+  - docs/intent-driven-lifecycle.md
+  - docs/intent-driven-update-safety.md
+
+createOnlyPaths:
+  - .gitignore
+  - CONSTITUTION.md
+  - CONTEXT.md
+  - ARCHITECTURE.md
+  - AGENTS.md
+  - .secrets.example.env
+  - adr/README.md
+  - openspec/config.yaml
+
+requiredPrompts:
+  - .codex/prompts/opsx-apply.md
+  - .codex/prompts/opsx-archive.md
+  - .codex/prompts/opsx-bulk-apply.md
+  - .codex/prompts/opsx-bulk-archive.md
+  - .codex/prompts/opsx-check-overlay.md
+  - .codex/prompts/opsx-review-off.md
+  - .codex/prompts/opsx-review-on.md
+  - .codex/prompts/opsx-review-reset.md
+  - .codex/prompts/opsx-review-set.md
+  - .codex/prompts/opsx-review-status.md
+  - .codex/prompts/opsx-continue.md
+  - .codex/prompts/opsx-explore.md
+  - .codex/prompts/opsx-ff.md
+  - .codex/prompts/opsx-new.md
+  - .codex/prompts/opsx-propose.md
+  - .codex/prompts/opsx-sync.md
+  - .codex/prompts/opsx-verify.md
+
+requiredMarkers:
+  - id: project-context-preflight
+    paths:
+      - .codex/prompts/opsx-apply.md
+      - .codex/prompts/opsx-archive.md
+      - .codex/prompts/opsx-bulk-apply.md
+      - .codex/prompts/opsx-bulk-archive.md
+      - .codex/prompts/opsx-check-overlay.md
+      - .codex/prompts/opsx-review-off.md
+      - .codex/prompts/opsx-review-on.md
+      - .codex/prompts/opsx-review-reset.md
+      - .codex/prompts/opsx-review-set.md
+      - .codex/prompts/opsx-review-status.md
+      - .codex/prompts/opsx-continue.md
+      - .codex/prompts/opsx-explore.md
+      - .codex/prompts/opsx-ff.md
+      - .codex/prompts/opsx-new.md
+      - .codex/prompts/opsx-propose.md
+      - .codex/prompts/opsx-sync.md
+      - .codex/prompts/opsx-verify.md
+    markers:
+      - "Project constitution preflight:"
+      - "project-constitution"
+      - "CONSTITUTION.md"
+      - ".secrets.local.env"
+  - id: hardened-lifecycle-apply-gates
+    paths:
+      - .codex/prompts/opsx-apply.md
+      - .codex/skills/openspec-apply-change/SKILL.md
+    markers:
+      - "grill.md"
+      - "design-review.md"
+      - "test-plan.md"
+      - "RED"
+      - "GREEN"
+      - "REFACTOR"
+  - id: artifact-review-session-controls
+    paths:
+      - .codex/prompts/opsx-review-status.md
+      - .codex/prompts/opsx-review-on.md
+      - .codex/prompts/opsx-review-off.md
+      - .codex/prompts/opsx-review-reset.md
+      - .codex/prompts/opsx-review-set.md
+    markers:
+      - "scripts/openspec-session-state"
+      - "OpenAI-compatible artifact review"
+      - "scripts/openspec-artifact-review"
