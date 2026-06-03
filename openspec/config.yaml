@@ -1,0 +1,24 @@
+schema: intent-driven
+
+context: |
+  This project uses Codex-native intent-driven development with OpenSpec.
+  Workflow: proposal -> specs -> grill -> design -> design-review -> adr -> test-plan -> tasks.
+  Codex reads CONSTITUTION.md, CONTEXT.md/CONTEXT-MAP.md, and ARCHITECTURE.md as project context; OpenSpec CLI does not.
+
+rules:
+  proposal:
+    - Draft proposal.md from user intent and project context.
+  specs:
+    - Use OpenSpec delta sections and Gherkin-style scenarios in Markdown.
+  grill:
+    - Run Matt grill-with-docs automatically before design; ask one material question at a time only when repository context cannot answer it.
+  design:
+    - Use diagrams for non-trivial boundaries or explain why none is needed; account for grill.md, ARCHITECTURE.md, and in-force ADRs.
+  design-review:
+    - Run Matt grill-with-docs automatically after design and before ADR/test planning.
+  adr:
+    - Durable ADRs live in top-level adr/ and are append-only; update ARCHITECTURE.md when current architecture changes.
+  test-plan:
+    - Use the project-local tdd skill to map requirements and scenarios to vertical RED/GREEN/REFACTOR slices before tasks.
+  tasks:
+    - Create dependency-ordered checkbox tasks based on proposal/specs/grill/design/design-review/ADR/test-plan.

@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$@" <<'PYCODE'
+import argparse, copy, datetime as dt, json, os, pathlib, re, sys
+from typing import Any, Dict, List
+
+SCHEMA_VERSION = 1
+VALID_GIT_MODES = {"auto", "manual"}
+VALID_REVIEW = {"on", "off", "reset"}
+VALID_STAGES = {"proposal", "specs", "grill", "design", "design-review", "adr", "test-plan", "tasks", "verify"}
+STAGE_KEY_MAP = {
+    "model": "model", "effort": "effort", "budget": "maxBudgetUsd", "maxBudgetUsd": "maxBudgetUsd", "max_budget_usd": "maxBudgetUsd",
+    "budgetRub": "maxBudgetRub", "maxBudgetRub": "maxBudgetRub", "max_budget_rub": "maxBudgetRub",
+    "promptProfile": "promptProfile", "prompt_profile": "promptProfile", "blockOn": "blockOn", "block_on": "blockOn", "blocking": "blockOn", "blockingPolicy": "blockOn",
+    "enabled": "enabled", "baseUrl": "baseUrl", "base_url": "baseUrl", "endpoint": "endpoint", "apiKeyEnv": "apiKeyEnv", "api_key_env": "apiKeyEnv",
+    "structuredOutputMode": "structuredOutputMode", "structured_output_mode": "structuredOutputMode", "temperature": "temperature", "maxTokens": "maxTokens", "max_tokens": "maxTokens",
+}
+SECRET_KEY_RE = re.compile(r"(secret|token|password|passwd|credential|private|authorization|auth[_-]?header|api[_-]?key|apikey)", re.I)
+ALLOWED_TOP = {"schemaVersion", "sessionKey", "createdAt", "updatedAt", "git", "claudeReview", "artifactReview"}
+ALLOWED_GIT = {"checkpointMode"}
+ALLOWED_REVIEW = {"decision", "enabled", "stages", "provider"}
+ALLOWED_PROVIDER = {"type", "baseUrl", "endpoint", "apiKeyEnv"}
+ALLOWED_STAGE = {"model", "effort", "maxBudgetUsd", "maxBudgetRub", "promptProfile", "blockOn", "enabled", "provider", "baseUrl", "endpoint", "apiKeyEnv", "structuredOutputMode", "temperature", "maxTokens", "reasoning"}
+
+def eprint(*args: Any) -> None: print(*args, file=sys.stderr)
+
+def find_root() -> pathlib.Path:
+    cwd = pathlib.Path.cwd().resolve()
+    if (cwd / "openspec" / "config.yaml").exists() and (cwd / ".codex").exists(): return cwd
+    try:
+        import subprocess
+        return pathlib.Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], cwd=str(cwd), text=True).strip()).resolve()
+    except Exception: return cwd
+
+def now() -> str: return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def session_key() -> str:
+    for name in ("CODEX_SESSION_ID", "CODEX_THREAD_ID", "OPENAI_SESSION_ID", "TERM_SESSION_ID"):
+        if os.environ.get(name): return os.environ[name]
+    return "local-worktree"
+
+def state_path(root: pathlib.Path) -> pathlib.Path:
+    override = os.environ.get("CODEX_OPENSPEC_SESSION_FILE")
+    if override: return pathlib.Path(override).expanduser().resolve()
+    return root / ".codex" / "session" / "openspec-session.json"
+
+def default_state() -> Dict[str, Any]:
+    return {"schemaVersion": SCHEMA_VERSION, "sessionKey": session_key(), "createdAt": None, "updatedAt": None, "git": {"checkpointMode": "auto"}, "artifactReview": {"decision": "unset", "stages": {}}, "claudeReview": {"decision": "unset", "stages": {}}}
+
+def deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    out = copy.deepcopy(a)
+    for k, v in b.items():
+        if v is None: out.pop(k, None)
+        elif isinstance(v, dict) and isinstance(out.get(k), dict): out[k] = deep_merge(out[k], v)  # type: ignore[arg-type]
+        else: out[k] = copy.deepcopy(v)
+    return out
+
+def load_state(path: pathlib.Path) -> Dict[str, Any]:
+    if not path.exists(): return default_state()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict): raise ValueError("session state must be a JSON object")
+    return deep_merge(default_state(), data)
+
+def allowed_secretish_key(path: str) -> bool:
+    return path.endswith("apiKeyEnv") or path.endswith("api_key_env") or path.endswith("maxTokens") or path.endswith("max_tokens")
+
+def walk_secret_keys(obj: Any, path: str = "") -> List[str]:
+    bad: List[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = str(k); p = f"{path}.{key}" if path else key
+            if SECRET_KEY_RE.search(key) and not allowed_secretish_key(p): bad.append(p)
+            bad.extend(walk_secret_keys(v, p))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj): bad.extend(walk_secret_keys(v, f"{path}[{i}]"))
+    return bad
+
+def validate_review_block(name: str, review: Dict[str, Any]) -> None:
+    if not isinstance(review, dict): raise ValueError(f"{name} must be an object")
+    unknown_review = set(review) - ALLOWED_REVIEW
+    if unknown_review: raise ValueError(f"unknown {name} field(s): " + ", ".join(sorted(unknown_review)))
+    if review.get("decision", "unset") not in {"unset", "enabled", "disabled"}: raise ValueError(f"{name}.decision must be unset, enabled, or disabled")
+    provider = review.get("provider") or {}
+    if not isinstance(provider, dict): raise ValueError(f"{name}.provider must be an object")
+    unknown_provider = set(provider) - ALLOWED_PROVIDER
+    if unknown_provider: raise ValueError(f"unknown provider field(s) for {name}: " + ", ".join(sorted(unknown_provider)))
+    stages = review.get("stages") or {}
+    if not isinstance(stages, dict): raise ValueError(f"{name}.stages must be an object")
+    for stage, cfg in stages.items():
+        if stage not in VALID_STAGES: raise ValueError(f"unknown stage {stage!r}")
+        if not isinstance(cfg, dict): raise ValueError(f"{name}.stages.{stage} must be an object")
+        unknown_stage = set(cfg) - ALLOWED_STAGE
+        if unknown_stage: raise ValueError(f"unknown stage field(s) for {stage}: " + ", ".join(sorted(unknown_stage)))
+
+def validate_state(state: Dict[str, Any]) -> None:
+    bad = walk_secret_keys(state)
+    if bad: raise ValueError("secret-looking session key(s) are not allowed: " + ", ".join(bad))
+    unknown_top = set(state) - ALLOWED_TOP
+    if unknown_top: raise ValueError("unknown top-level field(s): " + ", ".join(sorted(unknown_top)))
+    if state.get("schemaVersion") != SCHEMA_VERSION: raise ValueError("schemaVersion must be 1")
+    git = state.get("git") or {}
+    if not isinstance(git, dict): raise ValueError("git must be an object")
+    unknown_git = set(git) - ALLOWED_GIT
+    if unknown_git: raise ValueError("unknown git field(s): " + ", ".join(sorted(unknown_git)))
+    if git.get("checkpointMode", "auto") not in VALID_GIT_MODES: raise ValueError("git.checkpointMode must be auto or manual")
+    validate_review_block("artifactReview", state.get("artifactReview") or {})
+    validate_review_block("claudeReview", state.get("claudeReview") or {})
+
+def save_state(path: pathlib.Path, state: Dict[str, Any]) -> None:
+    stamp = now()
+    if not state.get("createdAt"): state["createdAt"] = stamp
+    state["updatedAt"] = stamp; state["schemaVersion"] = SCHEMA_VERSION; state.setdefault("sessionKey", session_key())
+    validate_state(state); path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp"); tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"); tmp.replace(path)
+
+def parse_value(key: str, value: str) -> Any:
+    if value.lower() in {"true", "false"}: return value.lower() == "true"
+    if key == "blockOn": return [p.strip() for p in value.split(",") if p.strip()]
+    if key in {"maxBudgetUsd", "maxBudgetRub"}:
+        if value.lower() in {"none", "null", "off", "disabled", "unlimited"}: return None
+        try: return float(value)
+        except ValueError: raise ValueError(f"{key} must be numeric, or one of none/null/off/disabled/unlimited")
+    if key in {"temperature"}:
+        return float(value)
+    if key in {"maxTokens"}:
+        return int(value)
+    return value
+
+def apply_review(state: Dict[str, Any], field: str, action: str) -> None:
+    review = state.setdefault(field, {})
+    if action == "on": review.update({"decision": "enabled", "enabled": True}); review.setdefault("stages", {})
+    elif action == "off": review.update({"decision": "disabled", "enabled": False}); review.setdefault("stages", {})
+    elif action == "reset": state[field] = {"decision": "unset", "stages": {}}
+
+def apply_stage(state: Dict[str, Any], field: str, values: List[str]) -> None:
+    if not values: raise ValueError("--set-review-stage requires a stage and key=value pairs")
+    stage = values[0]
+    if stage not in VALID_STAGES: raise ValueError(f"unknown stage {stage!r}")
+    if len(values) == 1: raise ValueError("--set-review-stage requires at least one key=value pair")
+    review = state.setdefault(field, {}); stages = review.setdefault("stages", {}); cfg = stages.setdefault(stage, {})
+    provider = cfg.setdefault("provider", {})
+    for item in values[1:]:
+        if "=" not in item: raise ValueError(f"stage setting must be key=value, got {item!r}")
+        raw_key, raw_value = item.split("=", 1); key = STAGE_KEY_MAP.get(raw_key)
+        if key is None: raise ValueError(f"unsupported stage setting {raw_key!r}")
+        target = provider if key in {"baseUrl", "endpoint", "apiKeyEnv"} else cfg
+        if raw_value == "" or raw_value.lower() == "null": target.pop(key, None)
+        else: target[key] = parse_value(key, raw_value)
+    if not provider: cfg.pop("provider", None)
+
+def effective_config(root: pathlib.Path, state: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    if kind == "artifact":
+        cfg_path = root / ".codex" / "openspec-artifact-review.json"; field = "artifactReview"; label = "Artifact review"
+    else:
+        cfg_path = root / ".codex" / "openspec-claude-review.json"; field = "claudeReview"; label = "Claude review"
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict): raise ValueError(f"{label} config must be an object")
+    cfg = copy.deepcopy(data); review = state.get(field) or {}; decision = review.get("decision", "unset")
+    if decision == "enabled": cfg["enabled"] = True
+    elif decision == "disabled": cfg["enabled"] = False
+    if review.get("provider") and kind == "artifact": cfg["provider"] = deep_merge(cfg.get("provider") or {}, review["provider"])
+    stages = review.get("stages") or {}
+    if stages:
+        cfg.setdefault("stages", {})
+        if not isinstance(cfg["stages"], dict): raise ValueError(f"{label} config stages must be an object")
+        for stage, overrides in stages.items():
+            base = cfg["stages"].get(stage) or {}
+            if not isinstance(base, dict): base = {}
+            cfg["stages"][stage] = deep_merge(base, overrides)
+    return cfg
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Manage local non-secret OpenSpec/Codex session state.")
+    parser.add_argument("--status", action="store_true"); parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--git-mode", choices=sorted(VALID_GIT_MODES))
+    parser.add_argument("--review", choices=sorted(VALID_REVIEW), help="provider-neutral artifact review session decision")
+    parser.add_argument("--claude-review", choices=sorted(VALID_REVIEW), help="legacy Claude review session decision")
+    parser.add_argument("--set-review-stage", nargs="+", action="append", metavar=("STAGE", "KEY=VALUE"))
+    parser.add_argument("--set-stage", nargs="+", action="append", metavar=("STAGE", "KEY=VALUE"), help="legacy alias for --set-review-stage against claudeReview")
+    parser.add_argument("--effective-review-config", action="store_true")
+    parser.add_argument("--effective-claude-config", action="store_true")
+    parser.add_argument("--out")
+    args = parser.parse_args(); root = find_root(); path = state_path(root); state = load_state(path); changed = False
+    if args.git_mode: state.setdefault("git", {})["checkpointMode"] = args.git_mode; changed = True
+    if args.review: apply_review(state, "artifactReview", args.review); changed = True
+    if args.claude_review: apply_review(state, "claudeReview", args.claude_review); changed = True
+    if args.set_review_stage:
+        for values in args.set_review_stage: apply_stage(state, "artifactReview", values)
+        changed = True
+    if args.set_stage:
+        for values in args.set_stage: apply_stage(state, "claudeReview", values)
+        changed = True
+    validate_state(state)
+    if changed: save_state(path, state)
+    if args.effective_review_config or args.effective_claude_config:
+        if not args.out: raise ValueError("effective config generation requires --out")
+        cfg = effective_config(root, state, "artifact" if args.effective_review_config else "claude")
+        bad = walk_secret_keys(cfg)
+        if bad: raise ValueError("secret-looking effective config key(s) are not allowed: " + ", ".join(bad))
+        out = pathlib.Path(args.out).expanduser().resolve(); out.parent.mkdir(parents=True, exist_ok=True); out.write_text(json.dumps(cfg, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.validate: print("OK: session state is valid")
+    if args.status or not (args.validate or args.effective_review_config or args.effective_claude_config or changed):
+        printable = copy.deepcopy(state); printable["statePath"] = str(path); print(json.dumps(printable, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+try: raise SystemExit(main())
+except Exception as exc:
+    eprint(f"ERROR: {exc}"); raise SystemExit(2)
+PYCODE

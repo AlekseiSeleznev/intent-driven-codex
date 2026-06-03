@@ -1,0 +1,39 @@
+{
+  "enabled": false,
+  "configVersion": 1,
+  "provider": {
+    "type": "openai-compatible",
+    "baseUrl": "https://polza.ai/api/v1",
+    "apiKeyEnv": "POLZA_AI_API_KEY",
+    "endpoint": "chat/completions"
+  },
+  "defaults": {
+    "model": "deepseek/deepseek-v4-pro",
+    "effort": "high",
+    "reasoning": {
+      "enabled": true,
+      "effort": "high",
+      "exclude": true
+    },
+    "temperature": 0,
+    "maxTokens": 4096,
+    "structuredOutputMode": "prompt_only",
+    "maxBudgetRub": null,
+    "maxBudgetUsd": null,
+    "blockOn": ["fail", "blocked"],
+    "unavailablePolicy": "warn",
+    "persistReport": true,
+    "inputMode": "bundle"
+  },
+  "stages": {
+    "proposal": { "enabled": false, "effort": "low" },
+    "specs": { "enabled": true, "effort": "medium" },
+    "grill": { "enabled": false },
+    "design": { "enabled": true, "effort": "high" },
+    "design-review": { "enabled": true, "effort": "high" },
+    "adr": { "enabled": true, "effort": "high" },
+    "test-plan": { "enabled": true, "effort": "medium" },
+    "tasks": { "enabled": true, "effort": "medium" },
+    "verify": { "enabled": true, "effort": "high" }
+  }
+}
