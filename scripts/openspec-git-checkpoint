@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "$@" <<'PY'
+import argparse
+import fnmatch
+import pathlib
+import subprocess
+import sys
+from typing import List, Tuple
+
+STAGES = {
+    "scaffold", "proposal", "specs", "grill", "design", "design-review", "adr", "test-plan", "tasks", "apply-group", "verify", "archive"
+}
+ARTIFACT_FILES = {
+    "proposal": "proposal.md",
+    "grill": "grill.md",
+    "design": "design.md",
+    "design-review": "design-review.md",
+    "adr": "adr.md",
+    "test-plan": "test-plan.md",
+    "tasks": "tasks.md",
+}
+
+
+def run(args: List[str], cwd: pathlib.Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, cwd=str(cwd), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+
+def git_root() -> pathlib.Path:
+    proc = run(["git", "rev-parse", "--show-toplevel"], pathlib.Path.cwd())
+    return pathlib.Path(proc.stdout.strip()).resolve()
+
+
+def relpath(root: pathlib.Path, path: str) -> str:
+    p = pathlib.Path(path)
+    if p.is_absolute():
+        return p.resolve().relative_to(root).as_posix()
+    value = p.as_posix()
+    while value.startswith("./"):
+        value = value[2:]
+    return value
+
+
+def parse_status(text: str) -> List[Tuple[str, str]]:
+    out: List[Tuple[str, str]] = []
+    for line in text.splitlines():
+        if not line:
+            continue
+        status = line[:2]
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        out.append((status, path))
+    return out
+
+
+def patterns_for(change: str, stage: str, includes: List[str]) -> List[str]:
+    base = f"openspec/changes/{change}"
+    patterns: List[str] = []
+    if stage == "scaffold":
+        patterns.append(f"{base}/.openspec.yaml")
+    elif stage == "specs":
+        patterns.append(f"{base}/specs/**")
+    elif stage in ARTIFACT_FILES:
+        patterns.append(f"{base}/{ARTIFACT_FILES[stage]}")
+        patterns.append(f"{base}/reviews/{stage}-artifact-review.json")
+        patterns.append(f"{base}/reviews/{stage}-claude-review.json")  # legacy
+    elif stage in {"apply-group", "verify", "archive"}:
+        # These stages are safe only when the workflow provides explicit paths.
+        pass
+    else:
+        raise SystemExit(f"unsupported stage: {stage}")
+    for item in includes:
+        item = item.strip()
+        if not item:
+            continue
+        while item.startswith("./"):
+            item = item[2:]
+        patterns.append(item)
+        if not any(ch in item for ch in "*?["):
+            patterns.append(item.rstrip("/") + "/**")
+    return patterns
+
+
+def matches(path: str, patterns: List[str]) -> bool:
+    for pat in patterns:
+        if fnmatch.fnmatch(path, pat) or path == pat:
+            return True
+    return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Create or dry-run a scoped OpenSpec lifecycle git checkpoint.")
+    parser.add_argument("--change", required=True)
+    parser.add_argument("--stage", required=True, choices=sorted(STAGES))
+    parser.add_argument("--message", required=True)
+    parser.add_argument("--include", action="append", default=[])
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    root = git_root()
+    patterns = patterns_for(args.change, args.stage, [relpath(root, p) for p in args.include])
+    if args.stage in {"apply-group", "verify", "archive"} and not args.include:
+        print(f"ERROR: stage {args.stage} requires at least one explicit --include path", file=sys.stderr)
+        return 2
+
+    status_text = run(["git", "status", "--porcelain=v1", "--untracked-files=all"], root).stdout
+    entries = parse_status(status_text)
+    allowed: List[Tuple[str, str]] = []
+    unrelated: List[Tuple[str, str]] = []
+    for status, path in entries:
+        if matches(path, patterns):
+            allowed.append((status, path))
+        else:
+            unrelated.append((status, path))
+
+    if unrelated:
+        print("ERROR: unrelated dirty paths block automatic checkpointing:", file=sys.stderr)
+        for status, path in unrelated:
+            print(f"  {status} {path}", file=sys.stderr)
+        print("Allowed patterns were:", file=sys.stderr)
+        for pat in patterns:
+            print(f"  {pat}", file=sys.stderr)
+        return 1
+
+    print(f"Checkpoint stage: {args.stage}")
+    print(f"Change: {args.change}")
+    print(f"Commit message: {args.message}")
+    print("Allowed patterns:")
+    for pat in patterns:
+        print(f"  {pat}")
+    if not allowed:
+        print("No dirty allowlisted paths to checkpoint.")
+        return 0
+    print("Paths to stage:")
+    for status, path in allowed:
+        print(f"  {status} {path}")
+
+    if args.dry_run:
+        print("Dry run: no files staged and no commit created.")
+        return 0
+
+    paths = [p for _, p in allowed]
+    run(["git", "add", "--", *paths], root)
+    diff = run(["git", "diff", "--cached", "--name-only"], root).stdout.strip()
+    if not diff:
+        print("No staged changes after git add; skipping commit.")
+        return 0
+    run(["git", "commit", "-m", args.message], root)
+    commit = run(["git", "rev-parse", "--short", "HEAD"], root).stdout.strip()
+    print(f"Commit: {commit}")
+    print("Post-commit status:")
+    print(run(["git", "status", "--short"], root).stdout, end="")
+    return 0
+
+
+raise SystemExit(main())
+PY

@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""Codex OpenSpec Powers installer and repair CLI.
+
+The CLI intentionally uses only the Python standard library so it can run in a
+fresh project without installing extra packages. It treats the OpenSpec CLI as
+the foundation and restores only manifest-listed template-owned overlay files.
+"""
+
+from __future__ import annotations
+
+import argparse
+import filecmp
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+
+TEMPLATE = "codex-openspec-powers"
+DEFAULT_SHARE_ROOT = Path.home() / ".local" / "share" / TEMPLATE
+DEFAULT_BIN_DIR = Path.home() / ".local" / "bin"
+DEFAULT_STATE_FILE = DEFAULT_SHARE_ROOT / "state.json"
+LEGACY_MANIFEST = Path(".codex/codex-openspec-powers/manifest.yaml")
+ROOT_MANIFEST = Path("manifest.yaml")
+DOC_SOURCE_ALIASES = {
+    "docs/intent-driven-lifecycle.md": "docs/lifecycle.md",
+    "docs/intent-driven-update-safety.md": "docs/update-safety.md",
+}
+
+
+def state_file() -> Path:
+    override = os.environ.get("OPSX_STATE_FILE")
+    if override:
+        return Path(override).expanduser()
+    return DEFAULT_STATE_FILE
+
+
+@dataclass
+class Manifest:
+    repair_root: Path
+    repair_excludes: list[str]
+    template_owned_paths: list[str]
+    create_only_paths: list[str]
+    required_prompts: list[str]
+    required_markers: list[dict[str, object]]
+
+
+@dataclass
+class RepairAction:
+    kind: str
+    source: Path
+    target: Path
+
+
+def _strip_yaml_value(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return value
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+    return value
+
+
+def load_manifest(source_root: Path) -> Manifest:
+    """Parse the subset of manifest.yaml needed by this CLI.
+
+    The project manifest is deliberately simple. A small parser avoids making
+    PyYAML a runtime dependency for users who only need automatic repair.
+    """
+
+    path = manifest_path(source_root)
+    if path is None:
+        searched = ", ".join(str(source_root / candidate) for candidate in manifest_candidates())
+        raise SystemExit(f"Missing manifest. Searched: {searched}")
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    repair_root = Path(".codex/codex-openspec-powers/template")
+    repair_excludes: list[str] = []
+    template_owned: list[str] = []
+    create_only: list[str] = []
+    required_prompts: list[str] = []
+    required_markers: list[dict[str, object]] = []
+
+    section: str | None = None
+    current_marker: dict[str, object] | None = None
+    marker_subsection: str | None = None
+    in_repair_sources = False
+    in_repair_exclude = False
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        indent = len(raw) - len(raw.lstrip(" "))
+
+        if indent == 0:
+            in_repair_sources = stripped == "repairSources:"
+            in_repair_exclude = False
+            marker_subsection = None
+            if stripped.endswith(":"):
+                section = stripped[:-1]
+            else:
+                section = None
+            continue
+
+        if in_repair_sources:
+            if indent == 2 and stripped.startswith("root:"):
+                repair_root = Path(_strip_yaml_value(stripped.split(":", 1)[1]))
+                continue
+            if indent == 2 and stripped == "exclude:":
+                in_repair_exclude = True
+                continue
+            if in_repair_exclude and indent == 4 and stripped.startswith("- "):
+                repair_excludes.append(_strip_yaml_value(stripped[2:]))
+                continue
+
+        if section in {"templateOwnedPaths", "createOnlyPaths", "requiredPrompts"}:
+            if indent == 2 and stripped.startswith("- "):
+                value = _strip_yaml_value(stripped[2:])
+                if section == "templateOwnedPaths":
+                    template_owned.append(value)
+                elif section == "createOnlyPaths":
+                    create_only.append(value)
+                else:
+                    required_prompts.append(value)
+            continue
+
+        if section == "requiredMarkers":
+            if indent == 2 and stripped.startswith("- id:"):
+                current_marker = {
+                    "id": _strip_yaml_value(stripped.split(":", 1)[1]),
+                    "paths": [],
+                    "markers": [],
+                }
+                required_markers.append(current_marker)
+                marker_subsection = None
+                continue
+            if current_marker is None:
+                continue
+            if indent == 4 and stripped in {"paths:", "markers:"}:
+                marker_subsection = stripped[:-1]
+                continue
+            if indent == 6 and stripped.startswith("- ") and marker_subsection:
+                current_marker[marker_subsection].append(_strip_yaml_value(stripped[2:]))
+                continue
+
+    return Manifest(
+        repair_root=repair_root,
+        repair_excludes=repair_excludes,
+        template_owned_paths=template_owned,
+        create_only_paths=create_only,
+        required_prompts=required_prompts,
+        required_markers=required_markers,
+    )
+
+
+def source_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    env_source = os.environ.get("OPSX_SOURCE_ROOT")
+    if env_source:
+        candidates.append(Path(env_source).expanduser())
+
+    # Running from the repository checkout.
+    script = Path(__file__).resolve()
+    candidates.append(script.parent.parent)
+
+    # Installed shared copy.
+    candidates.append(DEFAULT_SHARE_ROOT)
+
+    # Target project may already carry the bundled repair sources.
+    candidates.append(Path.cwd())
+    return candidates
+
+
+def find_source_root(explicit: str | None = None, target_root: Path | None = None) -> Path:
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    if target_root is not None:
+        candidates.append(target_root)
+    candidates.extend(source_candidates())
+    for candidate in candidates:
+        root = candidate.resolve()
+        if manifest_path(root) is not None:
+            return root
+    searched = "\n".join(f"- {c}" for c in candidates)
+    raise SystemExit(f"Cannot find {TEMPLATE} source root. Searched:\n{searched}")
+
+
+
+def manifest_candidates() -> list[Path]:
+    return [ROOT_MANIFEST, LEGACY_MANIFEST]
+
+
+def manifest_path(source_root: Path) -> Path | None:
+    for candidate in manifest_candidates():
+        path = source_root / candidate
+        if path.exists():
+            return path
+    return None
+
+
+def source_file_for_target(source_root: Path, target_pattern: str) -> tuple[Path, str]:
+    alias = DOC_SOURCE_ALIASES.get(target_pattern)
+    if alias and (source_root / alias).is_file():
+        return source_root / alias, target_pattern
+    return source_root / target_pattern, target_pattern
+
+def iter_files_for_pattern(root: Path, pattern: str) -> Iterable[Path]:
+    if pattern.endswith("/**"):
+        base = root / pattern[:-3]
+        if base.exists():
+            yield from (p for p in base.rglob("*") if p.is_file())
+        return
+    if any(ch in pattern for ch in "*?["):
+        yield from (p for p in root.glob(pattern) if p.is_file())
+        return
+    path = root / pattern
+    if path.is_file():
+        yield path
+
+
+def collect_source_files_for_pattern(
+    source_root: Path, pattern: str, manifest: Manifest
+) -> tuple[Path, list[Path]]:
+    source_pattern = pattern
+    source_base = source_root
+
+    if pattern in DOC_SOURCE_ALIASES and (source_root / DOC_SOURCE_ALIASES[pattern]).is_file():
+        return source_root, [source_root / DOC_SOURCE_ALIASES[pattern]]
+
+    if not pattern.startswith(str(manifest.repair_root)):
+        bundled_pattern = str(manifest.repair_root / pattern)
+        bundled_files = list(iter_files_for_pattern(source_root, bundled_pattern))
+        if bundled_files:
+            return source_root / manifest.repair_root, bundled_files
+
+    return source_base, list(iter_files_for_pattern(source_root, source_pattern))
+
+
+def target_relative_path(source: Path, source_base: Path, pattern: str) -> Path:
+    if pattern in DOC_SOURCE_ALIASES and source.name == Path(DOC_SOURCE_ALIASES[pattern]).name:
+        return Path(pattern)
+    return source.relative_to(source_base)
+
+
+def collect_repair_actions(
+    source_root: Path, target_root: Path, manifest: Manifest
+) -> list[RepairAction]:
+    actions: list[RepairAction] = []
+    for pattern in manifest.template_owned_paths:
+        source_base, source_files = collect_source_files_for_pattern(source_root, pattern, manifest)
+
+        for source in source_files:
+            rel = target_relative_path(source, source_base, pattern)
+            # The source repository stores canonical documentation names; do not
+            # create installed alias docs when checking/repairing itself.
+            alias = DOC_SOURCE_ALIASES.get(pattern)
+            if alias and (target_root / alias).resolve() == source.resolve():
+                target = target_root / alias
+            else:
+                target = target_root / rel
+            if not target.exists():
+                actions.append(RepairAction("create", source, target))
+            elif not filecmp.cmp(source, target, shallow=False):
+                actions.append(RepairAction("replace", source, target))
+
+    for pattern in manifest.create_only_paths:
+        source_base, source_files = collect_source_files_for_pattern(source_root, pattern, manifest)
+
+        for source in source_files:
+            rel = target_relative_path(source, source_base, pattern)
+            target = target_root / rel
+            if not target.exists():
+                actions.append(RepairAction("create", source, target))
+    return actions
+
+def warn_parent_git_root(target_root: Path) -> None:
+    """Warn when a target is nested below a parent Git worktree.
+
+    This is diagnostic only. It must not change repair/doctor behavior, and it
+    intentionally reports only local paths already supplied to the command.
+    """
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target_root), "rev-parse", "--show-toplevel"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+    if result.returncode != 0:
+        return
+    git_root = Path(result.stdout.strip()).expanduser().resolve()
+    if git_root != target_root.resolve() and not (target_root / ".git").exists():
+        print(
+            f"{TEMPLATE}: warning: target {target_root} is inside parent Git worktree "
+            f"{git_root} but is not itself a Git root; Git diagnostics may refer to the parent worktree.",
+            file=sys.stderr,
+        )
+
+def apply_actions(actions: list[RepairAction]) -> None:
+    for action in actions:
+        action.target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(action.source, action.target)
+
+
+def marker_errors(root: Path, manifest: Manifest) -> list[str]:
+    errors: list[str] = []
+    for prompt in manifest.required_prompts:
+        if not (root / prompt).exists():
+            errors.append(f"missing required prompt: {prompt}")
+
+    for rule in manifest.required_markers:
+        for rel in rule["paths"]:
+            path = root / str(rel)
+            if not path.exists():
+                errors.append(f"{rule['id']}: missing path {rel}")
+                continue
+            text = path.read_text(encoding="utf-8")
+            for marker in rule["markers"]:
+                if str(marker) not in text:
+                    errors.append(f"{rule['id']}: missing {marker!r} in {rel}")
+    return errors
+
+
+def command_repair(args: argparse.Namespace) -> int:
+    target_root = Path(args.root).expanduser().resolve()
+    warn_parent_git_root(target_root)
+    source_root = find_source_root(args.source_root, target_root=target_root)
+    manifest = load_manifest(source_root)
+    actions = collect_repair_actions(source_root, target_root, manifest)
+
+    if not actions:
+        print(f"{TEMPLATE}: overlay files already match template-owned sources")
+    else:
+        print(f"{TEMPLATE}: {len(actions)} repair action(s)")
+        if not args.summary:
+            for action in actions:
+                rel_target = action.target.relative_to(target_root)
+                rel_source = action.source.relative_to(source_root)
+                print(f"- {action.kind}: {rel_target} <= {rel_source}")
+
+    if actions and args.dry_run:
+        return 0
+
+    if actions and not args.yes:
+        print("Run again with --yes to apply this repair plan.")
+        return 2
+
+    if actions and not args.dry_run:
+        apply_actions(actions)
+        print(f"{TEMPLATE}: repair applied")
+
+    errors = marker_errors(target_root, manifest)
+    if errors:
+        print(f"{TEMPLATE}: marker check failed", file=sys.stderr)
+        for error in errors:
+            print(f"- {error}", file=sys.stderr)
+        return 1
+
+    print(f"{TEMPLATE}: overlay healthy")
+    return 0
+
+
+def command_doctor(args: argparse.Namespace) -> int:
+    target_root = Path(args.root).expanduser().resolve()
+    warn_parent_git_root(target_root)
+    source_root = find_source_root(args.source_root, target_root=target_root)
+    manifest = load_manifest(source_root)
+    actions = collect_repair_actions(source_root, target_root, manifest)
+    errors = marker_errors(target_root, manifest)
+
+    if actions:
+        print(f"{TEMPLATE}: {len(actions)} template-owned file(s) differ")
+        for action in actions:
+            print(f"- {action.kind}: {action.target.relative_to(target_root)}")
+    if errors:
+        print(f"{TEMPLATE}: {len(errors)} marker issue(s)")
+        for error in errors:
+            print(f"- {error}")
+
+    if actions or errors:
+        print(f"{TEMPLATE}: run `opsx repair --yes`")
+        return 1
+    print(f"{TEMPLATE}: overlay healthy")
+    return 0
+
+
+def path_without(paths_to_skip: set[Path]) -> str:
+    result: list[str] = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        resolved = Path(entry).expanduser().resolve()
+        if resolved in paths_to_skip:
+            continue
+        result.append(entry)
+    return os.pathsep.join(result)
+
+
+def find_real_openspec() -> str:
+    env = os.environ.get("OPSX_REAL_OPENSPEC")
+    if env and Path(env).exists():
+        return env
+
+    state = read_state()
+    real = state.get("real_openspec")
+    if real and Path(str(real)).exists():
+        return str(real)
+
+    skip = {Path(__file__).resolve().parent}
+    found = shutil.which("openspec", path=path_without(skip))
+    if found:
+        return found
+    raise SystemExit("Cannot find the real OpenSpec CLI. Set OPSX_REAL_OPENSPEC.")
+
+
+def init_target_path(openspec_args: list[str]) -> Path:
+    value_options = {"--tools", "--profile"}
+    positional: list[str] = []
+    index = 0
+    while index < len(openspec_args):
+        arg = openspec_args[index]
+        if arg == "--":
+            positional.extend(openspec_args[index + 1 :])
+            break
+        if arg in value_options:
+            index += 2
+            continue
+        if any(arg.startswith(opt + "=") for opt in value_options):
+            index += 1
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        positional.append(arg)
+        index += 1
+    return Path(positional[0]).expanduser().resolve() if positional else Path.cwd()
+
+
+def command_init(args: argparse.Namespace) -> int:
+    real = find_real_openspec()
+    openspec_args = list(args.openspec_args)
+    if not any(a == "--tools" or a.startswith("--tools=") for a in openspec_args):
+        openspec_args = ["--tools", "codex", *openspec_args]
+    target_root = init_target_path(openspec_args)
+    result = subprocess.run([real, "init", *openspec_args], check=False)
+    if result.returncode != 0:
+        return result.returncode
+    warn_parent_git_root(target_root)
+    source_root = find_source_root(args.source_root, target_root=None)
+    return command_repair(
+        argparse.Namespace(
+            root=str(target_root),
+            source_root=str(source_root),
+            yes=True,
+            dry_run=False,
+            summary=True,
+        )
+    )
+
+
+def read_state() -> dict[str, object]:
+    path = state_file()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def write_state(state: dict[str, object]) -> None:
+    path = state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+
+def run_version(executable: Path) -> str:
+    result = subprocess.run(
+        [str(executable), "--version"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"stale real OpenSpec check failed: {executable} --version exited {result.returncode}: {result.stderr.strip()}"
+        )
+    return result.stdout.strip() or result.stderr.strip()
+
+
+def normalized_version(output: str) -> str:
+    match = re.search(r"\d+(?:\.\d+){1,3}", output)
+    return match.group(0) if match else output.strip()
+
+
+def current_real_openspec(bin_dir: Path) -> Path | None:
+    env = os.environ.get("OPSX_REAL_OPENSPEC")
+    if env and Path(env).exists():
+        return Path(env).expanduser().resolve()
+    skip = {bin_dir.resolve(), Path(__file__).resolve().parent}
+    found = shutil.which("openspec", path=path_without(skip))
+    return Path(found).resolve() if found else None
+
+
+def check_real_openspec_sanity(bin_dir: Path) -> dict[str, str]:
+    state = read_state()
+    raw_real = state.get("real_openspec")
+    if not raw_real:
+        raise SystemExit("missing real OpenSpec path in opsx state")
+    recorded = Path(str(raw_real)).expanduser().resolve()
+    if not recorded.exists():
+        raise SystemExit(f"missing real OpenSpec path: {recorded}")
+
+    shim = (bin_dir / "openspec").expanduser().resolve()
+    script = Path(__file__).resolve()
+    if recorded == shim or recorded == script or recorded.parent == bin_dir.resolve():
+        raise SystemExit(f"stale real OpenSpec path points at shim/bin directory: {recorded}")
+
+    current = current_real_openspec(bin_dir)
+    recorded_output = run_version(recorded)
+    recorded_version = normalized_version(recorded_output)
+
+    current_version = recorded_version
+    current_path = recorded
+    if current is not None:
+        current_path = current
+        current_output = run_version(current)
+        current_version = normalized_version(current_output)
+        if current_version != recorded_version:
+            raise SystemExit(
+                "stale real OpenSpec path: "
+                f"recorded {recorded} reports {recorded_version}, "
+                f"current {current} reports {current_version}"
+            )
+
+    shim_version = recorded_version
+    if shim.exists():
+        shim_output = run_version(shim)
+        shim_version = normalized_version(shim_output)
+        if shim_version != recorded_version:
+            raise SystemExit(
+                "stale real OpenSpec shim delegation: "
+                f"shim {shim} reports {shim_version}, "
+                f"recorded {recorded} reports {recorded_version}"
+            )
+
+    return {
+        "recorded": str(recorded),
+        "current": str(current_path),
+        "shim": str(shim),
+        "version": recorded_version,
+    }
+
+
+def command_sanity(args: argparse.Namespace) -> int:
+    bin_dir = Path(args.bin_dir).expanduser().resolve()
+    info = check_real_openspec_sanity(bin_dir)
+    print(
+        f"{TEMPLATE}: real OpenSpec sanity ok "
+        f"version {info['version']} recorded {info['recorded']} current {info['current']}"
+    )
+    return 0
+
+def copy_source_tree(source_root: Path, share_root: Path) -> None:
+    source_root = source_root.resolve()
+    share_root = share_root.resolve()
+    if source_root == share_root:
+        print(f"{TEMPLATE}: source root already matches share root; preserving {share_root}")
+        return
+    if share_root.exists():
+        shutil.rmtree(share_root)
+    ignore = shutil.ignore_patterns(
+        ".git",
+        ".claude",
+        ".codex/session",
+        ".secrets.local.env",
+        ".secrets.*.local.env",
+        ".env.local",
+        ".env.*.local",
+        ".worktrees",
+        "__pycache__",
+        "*.pyc",
+        "CLAUDE_FULL_PROJECT_REVIEW_PROMPT.md",
+    )
+    shutil.copytree(source_root, share_root, ignore=ignore)
+
+
+def command_install_auto_repair(args: argparse.Namespace) -> int:
+    source_root = find_source_root(args.source_root)
+    real = find_real_openspec()
+    bin_dir = Path(args.bin_dir).expanduser().resolve()
+    share_root = Path(args.share_root).expanduser().resolve()
+
+    copy_source_tree(source_root, share_root)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, source_name in {"opsx": "opsx", "openspec": "openspec-shim"}.items():
+        src = share_root / "bin" / source_name
+        dst = bin_dir / name
+        shutil.copy2(src, dst)
+        dst.chmod(0o755)
+
+    write_state(
+        {
+            "source_root": str(share_root),
+            "real_openspec": real,
+            "bin_dir": str(bin_dir),
+        }
+    )
+
+    sanity = check_real_openspec_sanity(bin_dir)
+    print(f"{TEMPLATE}: real OpenSpec sanity ok version {sanity['version']} recorded {sanity['recorded']}")
+
+    print(f"{TEMPLATE}: installed opsx to {bin_dir / 'opsx'}")
+    print(f"{TEMPLATE}: installed openspec auto-repair shim to {bin_dir / 'openspec'}")
+    print(f"{TEMPLATE}: shared source root {share_root}")
+    print(f"{TEMPLATE}: real openspec {real}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="opsx", description="Codex OpenSpec Powers CLI")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    repair = sub.add_parser("repair", help="Repair template-owned overlay files")
+    repair.add_argument("--root", default=".", help="Target project root")
+    repair.add_argument("--source-root", help="Overlay source root")
+    repair.add_argument("--yes", action="store_true", help="Apply repair plan")
+    repair.add_argument("--dry-run", action="store_true", help="Show plan without writing")
+    repair.add_argument("--summary", action="store_true", help="Show counts without per-file details")
+    repair.set_defaults(func=command_repair)
+
+    doctor = sub.add_parser("doctor", help="Check overlay health")
+    doctor.add_argument("--root", default=".", help="Target project root")
+    doctor.add_argument("--source-root", help="Overlay source root")
+    doctor.set_defaults(func=command_doctor)
+
+    init = sub.add_parser("init", help="Run openspec init --tools codex and auto-repair")
+    init.add_argument("--source-root", help="Overlay source root")
+    init.add_argument("openspec_args", nargs=argparse.REMAINDER, help="Arguments passed to openspec init")
+    init.set_defaults(func=command_init)
+
+    sanity = sub.add_parser("sanity", help="Check installed shim and real OpenSpec path")
+    sanity.add_argument("--bin-dir", default=str(DEFAULT_BIN_DIR), help="Install directory for executables")
+    sanity.set_defaults(func=command_sanity)
+
+    install = sub.add_parser("install-auto-repair", help="Install opsx and openspec shim")
+    install.add_argument("--source-root", help="Overlay source root")
+    install.add_argument("--bin-dir", default=str(DEFAULT_BIN_DIR), help="Install directory for executables")
+    install.add_argument("--share-root", default=str(DEFAULT_SHARE_ROOT), help="Shared overlay source root")
+    install.set_defaults(func=command_install_auto_repair)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
