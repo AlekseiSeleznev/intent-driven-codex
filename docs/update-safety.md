@@ -60,7 +60,7 @@ OpenSpec artifacts.
 
 ## Session-state and checkpoint helpers
 
-After updates, `scripts/check-overlay` must validate `.codex/session/` ignore behavior, `scripts/openspec-session-state`, `scripts/openspec-git-checkpoint`, artifact review config validation, and checkpoint dry-run fixtures without contacting live artifact reviewer or reading `.secrets.local.env`.
+After updates, `scripts/check-overlay` must validate `.codex/session/` ignore behavior, `scripts/openspec-session-state`, `scripts/openspec-git-checkpoint`, artifact review config validation, session-effective ordinary artifact-review dry-run behavior, explicit `--config` priority, `--raw-config` / `--ignore-session` bypass behavior, and checkpoint dry-run fixtures without contacting live artifact reviewer or reading `.secrets.local.env`.
 
 ## Auto-repair shim safety
 

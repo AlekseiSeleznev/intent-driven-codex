@@ -21,7 +21,7 @@ Intent-driven policy:
 Artifact review session intent:
 - Reuse the current session decision from `scripts/openspec-session-state --status` when the helper exists; `/opsx:continue` should not ask the same enablement question repeatedly by default.
 - If no decision exists and the next ready artifact stage would run artifact review after resolving the effective config, ask once and record the answer with `scripts/openspec-session-state --review on|off`.
-- When review is enabled, generate a temporary effective config with `scripts/openspec-session-state --effective-review-config --out <tmp>` and pass it to `scripts/openspec-artifact-review --config <tmp>`.
+- When review is enabled, ordinary `scripts/openspec-artifact-review --change <name> --stage <artifact>` runs use the session-effective config by default; do not generate a temporary effective config just to make session `--review on/off` apply. Use explicit `--config <tmp>` only for deterministic diagnostics, and use `--raw-config` / `--ignore-session` when intentionally inspecting tracked raw config.
 
 Artifact support skills:
 - For `specs`, recommend `gherkin-authoring` and preserve OpenSpec Markdown as the source of truth.

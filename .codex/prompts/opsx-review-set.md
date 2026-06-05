@@ -10,6 +10,6 @@ Project constitution preflight:
 Set session-level artifact review stage settings:
 1. Parse the requested stage and key/value settings. Supported keys include `model`, `effort`, `budget`/`maxBudgetUsd`, `budgetRub`/`maxBudgetRub`, `baseUrl`, `endpoint`, `apiKeyEnv`, `structuredOutputMode`, `blockOn`, `enabled`, and non-secret request routing keys such as `providerOnly`, `providerIgnore`, `providerOrder`, `providerSort`, `allowFallbacks`, `providerMaxPrice`, or JSON `requestProvider`.
 2. Run `scripts/openspec-session-state --set-review-stage <stage> key=value ...`.
-3. Generate a temporary effective config with `scripts/openspec-session-state --effective-review-config --out <tmp>` and validate it with `scripts/openspec-artifact-review --validate-config --config <tmp>`.
+3. Validate the ordinary session-effective config with `scripts/openspec-artifact-review --validate-config`; use `--raw-config` / `--ignore-session` only when intentionally diagnosing tracked raw config.
 4. Show concise status and effective stage settings. Omit secret values; `apiKeyEnv` is allowed, real API keys are not.
 5. Leave `.codex/openspec-artifact-review.json` unchanged unless the user explicitly asks to change global defaults.

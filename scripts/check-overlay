@@ -184,6 +184,8 @@ UPDATE_DOC="$(first_existing_path docs/update-safety.md docs/intent-driven-updat
 require_contains "$UPDATE_DOC" "scripts/check-overlay" "$UPDATE_DOC documents scripts/check-overlay"
 require_contains "$UPDATE_DOC" "Ревью артефакта — test-plan: пройдено." "$UPDATE_DOC documents compact localized artifact review status"
 require_contains "$UPDATE_DOC" "round upward" "$UPDATE_DOC documents upward cost rounding"
+require_contains "$UPDATE_DOC" "session-effective ordinary artifact-review dry-run behavior" "$UPDATE_DOC documents session-effective artifact review checks"
+require_contains "$UPDATE_DOC" "--raw-config" "$UPDATE_DOC documents raw artifact review config escape hatch"
 require_absent "$UPDATE_DOC" "script/check-overlay" "$UPDATE_DOC contains obsolete script/check-overlay spelling"
 
 LIFECYCLE_DOC="$(first_existing_path docs/intent-driven-lifecycle.md docs/lifecycle.md || true)"
@@ -191,6 +193,8 @@ LIFECYCLE_DOC="$(first_existing_path docs/intent-driven-lifecycle.md docs/lifecy
 require_contains "$LIFECYCLE_DOC" "Ревью артефакта — test-plan: пройдено." "$LIFECYCLE_DOC documents compact localized artifact review status"
 require_contains "$LIFECYCLE_DOC" "round upward" "$LIFECYCLE_DOC documents upward cost rounding"
 require_contains "$LIFECYCLE_DOC" "---" "$LIFECYCLE_DOC documents separator-wrapped artifact review status"
+require_contains "$LIFECYCLE_DOC" "session-effective config by default" "$LIFECYCLE_DOC documents default session-effective artifact review config"
+require_contains "$LIFECYCLE_DOC" "--ignore-session" "$LIFECYCLE_DOC documents raw artifact review config escape hatch"
 
 require_artifact_review_block_rule() {
   local path="$1"
@@ -585,6 +589,109 @@ if not_done:
     raise SystemExit(f"artifacts not done: {not_done!r}")
 PY
 pass "project artifact" "smoke change is apply-ready"
+
+ARTIFACT_REVIEW_SESSION_TMP="$(mktemp -d)"
+ARTIFACT_REVIEW_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_TMP/session.json"
+ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG="$(mktemp)"
+python3 - <<'PY' "$ROOT/.codex/openspec-artifact-review.json" "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG"
+import json, pathlib, sys
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+config['enabled'] = False
+config.setdefault('stages', {}).setdefault('specs', {})['enabled'] = True
+config.setdefault('defaults', {})['persistReport'] = False
+pathlib.Path(sys.argv[2]).write_text(json.dumps(config, indent=2))
+PY
+
+env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-session-state --review on >/tmp/check-overlay-artifact-session-on-state.out
+ARTIFACT_REVIEW_SESSION_ON_JSON="$(env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-artifact-review --change "$SMOKE_CHANGE" --stage specs --dry-run 2>/tmp/check-overlay-artifact-session-on.err)" || {
+  cat /tmp/check-overlay-artifact-session-on.err >&2
+  rm -rf "$ARTIFACT_REVIEW_SESSION_TMP"; rm -f "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG"
+  fail "artifact review" "session-enabled ordinary dry-run failed"
+}
+ARTIFACT_REVIEW_SESSION_ON_JSON="$ARTIFACT_REVIEW_SESSION_ON_JSON" python3 - <<'PY' || fail "artifact review" "session-enabled ordinary dry-run result is invalid"
+import json, os
+obj = json.loads(os.environ['ARTIFACT_REVIEW_SESSION_ON_JSON'])
+if obj.get('verdict') == 'skipped' or not obj.get('dryRun'):
+    raise SystemExit(f"session-enabled ordinary dry-run unexpectedly skipped: {obj!r}")
+source = obj.get('configSource') or {}
+if source.get('mode') != 'session-effective' or source.get('sessionDecision') != 'enabled':
+    raise SystemExit(f"session-effective config source missing: {source!r}")
+PY
+
+env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-session-state --review off >/tmp/check-overlay-artifact-session-off-state.out
+set +e
+ARTIFACT_REVIEW_SESSION_OFF_JSON="$(env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-artifact-review --change "$SMOKE_CHANGE" --stage specs --dry-run 2>/tmp/check-overlay-artifact-session-off.err)"
+ARTIFACT_REVIEW_SESSION_OFF_CODE=$?
+set -e
+if [[ "$ARTIFACT_REVIEW_SESSION_OFF_CODE" != "3" ]]; then
+  cat /tmp/check-overlay-artifact-session-off.err >&2
+  rm -rf "$ARTIFACT_REVIEW_SESSION_TMP"; rm -f "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG"
+  fail "artifact review" "session-disabled ordinary dry-run exited $ARTIFACT_REVIEW_SESSION_OFF_CODE, expected 3"
+fi
+ARTIFACT_REVIEW_SESSION_OFF_JSON="$ARTIFACT_REVIEW_SESSION_OFF_JSON" python3 - <<'PY' || fail "artifact review" "session-disabled ordinary dry-run result is invalid"
+import json, os
+obj = json.loads(os.environ['ARTIFACT_REVIEW_SESSION_OFF_JSON'])
+if obj.get('verdict') != 'skipped':
+    raise SystemExit(f"session-disabled ordinary dry-run did not skip: {obj!r}")
+source = obj.get('configSource') or {}
+if source.get('mode') != 'session-effective' or source.get('sessionDecision') != 'disabled':
+    raise SystemExit(f"session-disabled config source missing: {source!r}")
+PY
+
+env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-session-state --review on >/tmp/check-overlay-artifact-session-on-again-state.out
+set +e
+ARTIFACT_REVIEW_EXPLICIT_JSON="$(env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-artifact-review --config "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG" --change "$SMOKE_CHANGE" --stage specs --dry-run 2>/tmp/check-overlay-artifact-explicit-config.err)"
+ARTIFACT_REVIEW_EXPLICIT_CODE=$?
+set -e
+if [[ "$ARTIFACT_REVIEW_EXPLICIT_CODE" != "3" ]]; then
+  cat /tmp/check-overlay-artifact-explicit-config.err >&2
+  rm -rf "$ARTIFACT_REVIEW_SESSION_TMP"; rm -f "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG"
+  fail "artifact review" "explicit disabled config exited $ARTIFACT_REVIEW_EXPLICIT_CODE, expected 3"
+fi
+ARTIFACT_REVIEW_EXPLICIT_JSON="$ARTIFACT_REVIEW_EXPLICIT_JSON" python3 - <<'PY' || fail "artifact review" "explicit config priority result is invalid"
+import json, os
+obj = json.loads(os.environ['ARTIFACT_REVIEW_EXPLICIT_JSON'])
+if obj.get('verdict') != 'skipped':
+    raise SystemExit(f"explicit disabled config did not skip: {obj!r}")
+if (obj.get('configSource') or {}).get('mode') != 'explicit':
+    raise SystemExit(f"explicit config source missing: {obj.get('configSource')!r}")
+PY
+
+set +e
+ARTIFACT_REVIEW_RAW_JSON="$(env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-artifact-review --raw-config --change "$SMOKE_CHANGE" --stage specs --dry-run 2>/tmp/check-overlay-artifact-raw-config.err)"
+ARTIFACT_REVIEW_RAW_CODE=$?
+set -e
+if [[ "$ARTIFACT_REVIEW_RAW_CODE" != "3" ]]; then
+  cat /tmp/check-overlay-artifact-raw-config.err >&2
+  rm -rf "$ARTIFACT_REVIEW_SESSION_TMP"; rm -f "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG"
+  fail "artifact review" "raw-config bypass exited $ARTIFACT_REVIEW_RAW_CODE, expected 3"
+fi
+ARTIFACT_REVIEW_RAW_JSON="$ARTIFACT_REVIEW_RAW_JSON" python3 - <<'PY' || fail "artifact review" "raw-config bypass result is invalid"
+import json, os
+obj = json.loads(os.environ['ARTIFACT_REVIEW_RAW_JSON'])
+if obj.get('verdict') != 'skipped':
+    raise SystemExit(f"raw config bypass did not skip: {obj!r}")
+if (obj.get('configSource') or {}).get('mode') != 'raw':
+    raise SystemExit(f"raw config source missing: {obj.get('configSource')!r}")
+PY
+
+set +e
+ARTIFACT_REVIEW_IGNORE_JSON="$(env CODEX_OPENSPEC_SESSION_FILE="$ARTIFACT_REVIEW_SESSION_FILE" scripts/openspec-artifact-review --ignore-session --change "$SMOKE_CHANGE" --stage specs --dry-run 2>/tmp/check-overlay-artifact-ignore-session.err)"
+ARTIFACT_REVIEW_IGNORE_CODE=$?
+set -e
+if [[ "$ARTIFACT_REVIEW_IGNORE_CODE" != "3" ]]; then
+  cat /tmp/check-overlay-artifact-ignore-session.err >&2
+  rm -rf "$ARTIFACT_REVIEW_SESSION_TMP"; rm -f "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG"
+  fail "artifact review" "ignore-session bypass exited $ARTIFACT_REVIEW_IGNORE_CODE, expected 3"
+fi
+ARTIFACT_REVIEW_IGNORE_JSON="$ARTIFACT_REVIEW_IGNORE_JSON" python3 - <<'PY' || fail "artifact review" "ignore-session bypass result is invalid"
+import json, os
+obj = json.loads(os.environ['ARTIFACT_REVIEW_IGNORE_JSON'])
+if obj.get('verdict') != 'skipped' or (obj.get('configSource') or {}).get('mode') != 'raw':
+    raise SystemExit(f"ignore-session bypass failed: {obj!r}")
+PY
+rm -rf "$ARTIFACT_REVIEW_SESSION_TMP"; rm -f "$ARTIFACT_REVIEW_EXPLICIT_DISABLED_CONFIG"
+pass "artifact review" "ordinary dry-run respects session on/off while explicit/raw config bypass session state"
 
 ARTIFACT_REVIEW_TMP_CONFIG="$(mktemp)"
 python3 - <<'PY' "$ROOT/.codex/openspec-artifact-review.json" "$ARTIFACT_REVIEW_TMP_CONFIG"

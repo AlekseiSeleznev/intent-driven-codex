@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 python3 - "$@" <<'PYCODE'
-import argparse, datetime as dt, decimal, fnmatch, hashlib, json, os, pathlib, sys, urllib.error, urllib.request
+import argparse, datetime as dt, decimal, fnmatch, hashlib, json, os, pathlib, re, sys, urllib.error, urllib.request
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 STAGES = ["proposal", "specs", "grill", "design", "design-review", "adr", "test-plan", "tasks", "verify"]
@@ -74,6 +74,84 @@ def deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
         else:
             out[k] = v
     return out
+
+SECRET_KEY_RE = re.compile(r"(secret|token|password|passwd|credential|private|authorization|auth[_-]?header|api[_-]?key|apikey)", re.I)
+SESSION_REVIEW_ALLOWED = {"decision", "enabled", "stages", "provider"}
+SESSION_PROVIDER_ALLOWED = {"type", "baseUrl", "endpoint", "apiKeyEnv"}
+
+def allowed_secretish_key(path: str) -> bool:
+    return path.endswith("apiKeyEnv") or path.endswith("api_key_env") or path.endswith("maxTokens") or path.endswith("max_tokens")
+
+def walk_secret_keys(obj: Any, path: str = "") -> List[str]:
+    bad: List[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = str(k); p = f"{path}.{key}" if path else key
+            if SECRET_KEY_RE.search(key) and not allowed_secretish_key(p): bad.append(p)
+            bad.extend(walk_secret_keys(v, p))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj): bad.extend(walk_secret_keys(v, f"{path}[{i}]"))
+    return bad
+
+def session_state_path(root: pathlib.Path) -> pathlib.Path:
+    override = os.environ.get("CODEX_OPENSPEC_SESSION_FILE")
+    if override: return pathlib.Path(override).expanduser().resolve()
+    return root / ".codex" / "session" / "openspec-session.json"
+
+def default_artifact_review_state() -> Dict[str, Any]:
+    return {"decision": "unset", "stages": {}}
+
+def load_artifact_review_state(path: pathlib.Path) -> Tuple[Dict[str, Any], bool]:
+    if not path.exists(): return default_artifact_review_state(), False
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict): raise ValueError("session state must be a JSON object")
+    bad = walk_secret_keys(data)
+    if bad: raise ValueError("secret-looking session key(s) are not allowed: " + ", ".join(bad))
+    review = data.get("artifactReview") or {}
+    if not isinstance(review, dict): raise ValueError("artifactReview session state must be an object")
+    unknown = set(review) - SESSION_REVIEW_ALLOWED
+    if unknown: raise ValueError("unknown artifactReview session field(s): " + ", ".join(sorted(unknown)))
+    provider = review.get("provider") or {}
+    if not isinstance(provider, dict): raise ValueError("artifactReview.provider must be an object")
+    provider_unknown = set(provider) - SESSION_PROVIDER_ALLOWED
+    if provider_unknown: raise ValueError("unknown artifactReview.provider field(s): " + ", ".join(sorted(provider_unknown)))
+    decision = review.get("decision", "unset")
+    if decision not in {"unset", "enabled", "disabled"}: raise ValueError("artifactReview.decision must be unset, enabled, or disabled")
+    merged = default_artifact_review_state(); merged.update(review)
+    return merged, True
+
+def apply_artifact_review_session(base_config: Dict[str, Any], review: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = json.loads(json.dumps(base_config))
+    decision = review.get("decision", "unset")
+    if decision == "enabled": cfg["enabled"] = True
+    elif decision == "disabled": cfg["enabled"] = False
+    provider = review.get("provider")
+    if isinstance(provider, dict) and provider:
+        cfg["provider"] = deep_merge(cfg.get("provider") or {}, provider)
+    stages = review.get("stages") or {}
+    if isinstance(stages, dict) and stages:
+        cfg.setdefault("stages", {})
+        if not isinstance(cfg["stages"], dict): raise ValueError("artifact review config stages must be an object")
+        for stage, overrides in stages.items():
+            base = cfg["stages"].get(stage) or {}
+            if not isinstance(base, dict): base = {}
+            if not isinstance(overrides, dict): raise ValueError(f"artifactReview.stages.{stage} must be an object")
+            cfg["stages"][stage] = deep_merge(base, overrides)
+    return cfg
+
+def load_review_config(root: pathlib.Path, explicit_config: Optional[str], use_raw_config: bool) -> Tuple[Dict[str, Any], Dict[str, Any], pathlib.Path]:
+    if explicit_config:
+        path = pathlib.Path(explicit_config).resolve()
+        return load_json(path), {"mode": "explicit", "configPath": rel(root, path) if path.is_relative_to(root) else str(path)}, path
+    path = root / ".codex" / "openspec-artifact-review.json"
+    raw = load_json(path)
+    if use_raw_config:
+        return raw, {"mode": "raw", "configPath": rel(root, path)}, path
+    session_path = session_state_path(root)
+    review, present = load_artifact_review_state(session_path)
+    cfg = apply_artifact_review_session(raw, review)
+    source = {"mode": "session-effective", "configPath": rel(root, path), "sessionPath": rel(root, session_path) if session_path.is_relative_to(root) else str(session_path), "sessionPresent": present, "sessionDecision": review.get("decision", "unset")}
+    return cfg, source, path
 
 def merged_stage(config: Dict[str, Any], stage: str) -> Dict[str, Any]:
     defaults = dict(config.get("defaults") or {})
@@ -321,7 +399,7 @@ def cost_display(cost: Dict[str, Any]) -> Dict[str, Any]:
     if rounded is None: return {}
     return {"totalCostRubRoundedUp": float(rounded), "totalCostRubRu": rub_display(rub) }
 
-def make_base_report(change: str, stage: str, stage_cfg: Dict[str, Any], files: List[Dict[str, Any]], omitted: List[Dict[str, Any]]) -> Dict[str, Any]:
+def make_base_report(change: str, stage: str, stage_cfg: Dict[str, Any], files: List[Dict[str, Any]], omitted: List[Dict[str, Any]], config_source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     provider = stage_cfg.get("provider") or {}
     return {
         "schemaVersion": 1, "change": change, "stage": stage,
@@ -330,6 +408,7 @@ def make_base_report(change: str, stage: str, stage_cfg: Dict[str, Any], files: 
         "requestProvider": stage_cfg.get("requestProvider") if isinstance(stage_cfg.get("requestProvider"), dict) else None,
         "budgetLimitRub": stage_cfg.get("maxBudgetRub"), "budgetLimitUsd": stage_cfg.get("maxBudgetUsd"),
         "command": {"api": "chat/completions", "structuredOutputMode": stage_cfg.get("structuredOutputMode", "prompt_only"), "inputMode": stage_cfg.get("inputMode", "bundle")},
+        "configSource": config_source or {},
         "reviewedFiles": files, "omittedContext": omitted,
         "reviewedAt": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     }
@@ -506,6 +585,8 @@ def disposition_summary(root: pathlib.Path, change: str, stage: Optional[str] = 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run or validate OpenAI-compatible OpenSpec artifact reviews.")
     parser.add_argument("--change"); parser.add_argument("--stage", choices=STAGES); parser.add_argument("--config")
+    parser.add_argument("--raw-config", action="store_true", help="ignore session state and read tracked raw artifact review config")
+    parser.add_argument("--ignore-session", action="store_true", help="alias for --raw-config")
     parser.add_argument("--validate-config", action="store_true"); parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--parse-file"); parser.add_argument("--write-report", action="store_true"); parser.add_argument("--cost-summary", action="store_true"); parser.add_argument("--disposition-summary", action="store_true")
     args = parser.parse_args(); root = find_root()
@@ -516,17 +597,18 @@ def main() -> int:
     if args.cost_summary:
         if not args.change: eprint("--change is required with --cost-summary"); return 2
         write_json(cost_summary(root, args.change)); return 0
-    config_path = pathlib.Path(args.config).resolve() if args.config else root / ".codex" / "openspec-artifact-review.json"
-    try: config = load_json(config_path)
-    except Exception as exc: eprint(f"config error: {exc}"); return 2
+    try:
+        config, config_source, config_path = load_review_config(root, args.config, bool(args.raw_config or args.ignore_session))
+    except Exception as exc:
+        eprint(f"config error: {exc}"); return 2
     validation = validate_config(config)
     if args.validate_config:
-        write_json({"configPath": rel(root, config_path) if config_path.is_relative_to(root) else str(config_path), **validation}); return 0 if validation["valid"] else 2
+        write_json({"configPath": rel(root, config_path) if config_path.is_relative_to(root) else str(config_path), "configSource": config_source, **validation}); return 0 if validation["valid"] else 2
     if not validation["valid"]: write_json({"configPath": str(config_path), **validation}); return 2
     if not args.change or not args.stage: eprint("--change and --stage are required unless --validate-config is used"); return 2
     stage_cfg = merged_stage(config, args.stage)
     files, omitted = collect_files(root, args.change, args.stage)
-    base = make_base_report(args.change, args.stage, stage_cfg, files, omitted)
+    base = make_base_report(args.change, args.stage, stage_cfg, files, omitted, config_source)
     out_path = report_path(root, args.change, args.stage); base["reportPath"] = rel(root, out_path)
     if not stage_cfg.get("enabled"):
         base.update({"verdict": "skipped", "summary": "Artifact review skipped because global or stage configuration disables it.", "mustFix": [], "shouldFix": [], "questions": [], "dryRun": bool(args.dry_run)})

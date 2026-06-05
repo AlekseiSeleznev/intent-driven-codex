@@ -106,9 +106,13 @@ and hard-gate bypasses still require explicit approval.
 
 Artifact review enablement and stage settings can be overlaid per session through
 ignored non-secret `.codex/session/openspec-session.json`; the overlay merges
-over `.codex/openspec-artifact-review.json` and never stores credentials. Legacy
-`claudeReview` session state is tolerated for old local files but does not enable
-current artifact review.
+over `.codex/openspec-artifact-review.json` and never stores credentials. Ordinary
+`scripts/openspec-artifact-review` runs use this session-effective config by
+default when no explicit `--config` is provided. Explicit `--config <path>` stays
+deterministic and bypasses implicit session merge; `--raw-config` /
+`--ignore-session` diagnose the tracked raw config directly. Legacy `claudeReview`
+session state is tolerated for old local files but does not enable current
+artifact review.
 
 When `.codex/openspec-artifact-review.json` enables a stage, Codex can call
 `scripts/openspec-artifact-review` after generating that artifact. The helper uses
