@@ -6,4 +6,4 @@
 - [x] Add `scripts/check-overlay` regression fixtures for review on, review off, explicit config priority, and raw-config bypass.
 - [x] Update artifact review/session documentation and prompt/skill guidance.
 - [x] Update architecture snapshot for helper session-effective behavior.
-- [ ] Run verification, archive the change, and commit.
+- [x] Run verification, archive the change, and commit.
